@@ -262,7 +262,7 @@ def make_rows(xy, t0, life, size, rgb, device, weight=0.5):
     rows[:, LOG_ST] = torch.as_tensor(life, dtype=torch.float32, device=device).log()
     size = torch.as_tensor(size, dtype=torch.float32, device=device).expand(k)
     rows[:, LOG_S] = size.log().unsqueeze(1).expand(k, 2)
-    rows[:, THETA] = torch.rand(k, device=device) * math.pi
+    rows[:, THETA] = torch.rand(k).to(device) * math.pi     # CPU generator: same on every device
     rows[:, COL] = logit(rgb)
     rows[:, OP] = math.log(weight / (1 - weight))
     return rows

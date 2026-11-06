@@ -16,7 +16,31 @@ WINDOWS = (8, 16, 32, 64, 128, 256, 512, 1024)
 _BACKEND = "torch"
 
 
-def set_backend(name="auto"):
+def self_test(device="cpu", n=400, width=96, height=64):
+    """Render a random scene with both renderers on `device` and compare the image
+    and the gradients. Returns (max image difference, relative gradient difference)."""
+    import torch as _t
+    from . import model as M
+    from . import render_warp
+    g = _t.Generator().manual_seed(1)
+    rows = M.make_rows(_t.rand(n, 2, generator=g) * _t.tensor([1.0, height / width]), 0.0, 1.0,
+                       _t.rand(n, generator=g) * 0.05 + 0.005, _t.rand(n, 3, generator=g), "cpu")
+    rows[:, M.LOG_S] += _t.randn(n, 2, generator=g) * 0.3
+    rows = rows.to(device)
+    bounds = _t.tensor([[-1e9, 1e9, 0.0]], device=device).expand(n, 3)
+    target = _t.rand(height, width, 3, generator=g).to(device)
+    out = []
+    for fn in (lambda sl: _torch_render(sl, width, height, 1024),
+               lambda sl: render_warp.render(sl, width, height)):
+        r = rows.clone().requires_grad_(True)
+        img, tot = fn(M.slice_at(r, bounds, 0.0))
+        (((img - target) ** 2).mean() + 0.1 * tot.mean()).backward()
+        out.append((img.detach(), r.grad.detach()))
+    (i1, g1), (i2, g2) = out
+    return float((i1 - i2).abs().max()), float((g1 - g2).norm() / g1.norm().clamp_min(1e-12))
+
+
+def set_backend(name="auto", device="cpu", log=None):
     """Choose the renderer: "warp" (fast compiled kernels, pip install warp-lang),
     "torch" (plain PyTorch, always available) or "auto" (warp if it is installed).
     Returns the backend actually in use."""
@@ -28,8 +52,25 @@ def set_backend(name="auto"):
         except Exception:
             ok = False
         if ok:
-            _BACKEND = "warp"
-            return _BACKEND
+            # check it really agrees with the reference renderer on this device
+            try:
+                img_d, grad_d = self_test(device)
+                good = img_d < 1e-3 and grad_d < 1e-3
+            except Exception as e:      # pragma: no cover
+                img_d, grad_d, good = float("nan"), float("nan"), False
+                if log:
+                    log(f"[setup] warp renderer failed its self-test on {device}: {e}")
+            if log:
+                log(f"[setup] warp renderer self-test on {device}: image diff {img_d:.2e}, "
+                    f"gradient diff {grad_d:.2e} -> {'ok' if good else 'MISMATCH'}")
+            if good:
+                _BACKEND = "warp"
+                return _BACKEND
+            if log:
+                log("[setup] falling back to the slower torch renderer; please report this "
+                    "(warp version, GPU, driver)")
+            if name == "warp":
+                raise RuntimeError("the warp renderer disagrees with the reference renderer on this device")
         if name == "warp":
             raise RuntimeError("--renderer warp needs NVIDIA Warp: python -m pip install warp-lang")
     _BACKEND = "torch"
@@ -107,6 +148,11 @@ def render(sl, width, height, max_window=256, eps=1e-6, chunk_pixels=4_000_000):
     if _BACKEND == "warp":
         from . import render_warp
         return render_warp.render(sl, width, height, eps)
+    return _torch_render(sl, width, height, max_window, eps, chunk_pixels)
+
+
+def _torch_render(sl, width, height, max_window=256, eps=1e-6, chunk_pixels=4_000_000):
+    """The plain-PyTorch renderer (reference, always available)."""
     device = sl["mean"].device
     hw = height * width
     acc = torch.zeros(hw + 1, 4, device=device)       # last row is a dump slot

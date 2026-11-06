@@ -25,7 +25,6 @@ import torch
 from stsplat import io as SIO
 from stsplat import model as M
 from stsplat import render as R
-R.set_backend("auto")
 from encode import ssim, psnr, fmt_time, log
 
 
@@ -68,9 +67,13 @@ def main():
     p.add_argument("--batch", type=int, default=2)
     p.add_argument("--lr", type=float, default=0.005)
     p.add_argument("--device", default="auto")
+    p.add_argument("--log", default="", help="also write everything printed (command line, all progress lines, final report) to this text file")
     a = p.parse_args()
+    from stsplat import logfile
+    logfile.start(a.log)
 
     dev = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
+    R.set_backend("auto", dev, log)
     d = SIO.load_jyvw(a.input)
     rows, bounds = d["rows"].to(dev), d["bounds"].to(dev)
     parent = d["parent"].to(dev)

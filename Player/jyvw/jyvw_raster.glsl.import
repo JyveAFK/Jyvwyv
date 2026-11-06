@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://bvwcboeomq7o5"
+path="res://.godot/imported/jyvw_raster.glsl-18aba751a242ce5c0721125401e08dac.res"
+
+[deps]
+
+source_file="res://jyvw/jyvw_raster.glsl"
+dest_files=["res://.godot/imported/jyvw_raster.glsl-18aba751a242ce5c0721125401e08dac.res"]
+
+[params]
+

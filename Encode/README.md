@@ -91,8 +91,17 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
 `True` at the end means the encoder will use the GPU. When it starts, the encoder
-prints a line like `[setup] device cuda, renderer warp`: `renderer warp` means the
-fast renderer is in use. `--device cpu` forces the CPU.
+checks the fast renderer against the reference one on your device and prints:
+
+```
+[setup] warp renderer self-test on cuda: image diff 3.0e-07, gradient diff 7.0e-07 -> ok
+[setup] device cuda, renderer warp
+```
+
+`renderer warp` means the fast renderer is in use. If the self-test reports
+`MISMATCH`, the encoder falls back to the slower `torch` renderer so results
+stay correct; please report that line (with your Warp version and GPU).
+`--device cpu` forces the CPU.
 
 ### ffmpeg
 
@@ -175,7 +184,7 @@ python encode.py anim.gif anim.jyvw --loop --fit-width 640 --iters 8000 --batch 
 | `--loop` | time wraps around: blobs near the end carry on into the start, so playback (including slow motion) is seamless through the loop point. The whole clip is fitted as one window |
 | `--fit-width 640` | set to the GIF's real width: fit at native resolution for maximum detail |
 | `--iters 8000 --batch 4` | the single window gets the whole budget; every frame is seen many times |
-| `--max-prims 20000 --spawn-count 400` | room for fine detail in the busy area |
+| `--max-prims 20000 --spawn-count 400` | room for fine detail in the busy area. Scale this with the picture: about 0.1-0.2 x fit width x fit height (20000 suits 640 wide; at `--fit-width 300` use about 5000-7500). Far more blobs than pixels can use only slows encoding |
 | `--densify-until 0.8` | keeps adding blobs for longer before switching to pure refinement |
 | `--min-size 0.8 --error-floor 0.01` | allows smaller blobs and chases smaller errors |
 | `--min-contrib 0.1` | gentler pruning, so fine detail isn't removed |
@@ -248,6 +257,29 @@ See [File size](#6-file-size).
 
 ---
 
+### Choosing `--max-prims` (how many blobs)
+
+Size the blob budget to the picture you fit, not the source video: aim for
+**0.1-0.2 blobs per pixel of fit width x fit height**. The fit height follows the
+source's shape (for example 300 wide at 2.4:1 is 300x125).
+
+| Fit size | Pixels | Lighter (0.1/px) | Good default | Maximum detail (0.2/px) |
+|---|---|---|---|---|
+| 300 x 125 (2.4:1) | 37,500 | 4,000 | 6,000 | 7,500 |
+| 320 x 180 (16:9) | 57,600 | 6,000 | 9,000 | 11,500 |
+| 640 x 360 (16:9) | 230,400 | 23,000 | 35,000 | 46,000 |
+| 640 x 266 (2.4:1) | 170,000 | 17,000 | 25,000 | 34,000 |
+
+- Fewer blobs: quicker encodes and smaller files, softer detail.
+- Beyond about 0.2 per pixel, extra blobs mostly add encoding time and file size,
+  not visible detail. Far beyond it (more blobs than the picture can use), flat
+  areas can become unstable; the encoder prints a note in its `[plan]` lines when
+  the budget is above 0.25 per pixel.
+- Want more detail than 0.2 per pixel gives? Raise `--fit-width` instead: at
+  600 wide the same density allows roughly four times as many blobs as at 300.
+- `--max-prims` limits the blobs being fitted at once (one window). Long videos
+  end up with more blobs in total, since each window adds its own.
+
 ## 4. Encoder settings
 
 `python encode.py --help` lists everything. The main ones:
@@ -268,6 +300,7 @@ See [File size](#6-file-size).
 | Static backgrounds | on by default: `--static-thresh`, `--no-static` |
 | Shared motion (groups) | on by default: `--group-tol`, `--group-min`, `--group-residual`, `--group-leave`, `--no-groups` |
 | Grainy / noisy sources | `--denoise 0.5` (off by default) |
+| Stable flat areas | `--colour-anchor`, `--colour-margin`, `--min-coverage`, `--coverage-weight` (on by default) |
 | Scene cuts | `--cut-thresh` (add `--cut-thresh 1` if flashes are mistaken for cuts) |
 | Dark scenes | `--dark-boost` |
 | Largest blob | `--max-window` (footprint in fit pixels; raise for big flat areas) |
@@ -288,7 +321,13 @@ See [File size](#6-file-size).
    far cheaper and the big structure settles; the rest run at full resolution.
 5. Each iteration renders random frames as time slices (with the Warp renderer
    when installed), compares them with the source (L1 + SSIM, dark areas weighted
-   by `--dark-boost`) and updates every blob and group-track parameter.
+   by `--dark-boost`) and updates every blob and group-track parameter. Two small
+   extra terms keep flat areas stable: a blob's colour may not stray more than
+   `--colour-margin` from the source colour at its centre (`--colour-anchor`), and
+   every pixel keeps at least `--min-coverage` total blob weight. Without them,
+   very dense blob budgets can drift into blobs with extreme colours that only
+   look right by cancelling each other out, which breaks up into speckles and
+   holes in flat areas.
 6. Every `--spawn-every` iterations a densify pass runs:
    - **prune:** remove blobs with negligible weight, plus blobs that decide fewer
      than `--min-contrib` pixels per frame (buried under others or redundant)
@@ -380,7 +419,34 @@ the full file. Looping files stay looping.
 
 ---
 
-## 7. Checking quality
+## 7. Troubleshooting
+
+- **Speckles, harsh colours or black holes in flat areas:** usually far more blobs
+  than the picture needs (`--max-prims` well above 0.2 x fit width x fit height),
+  often with a low `--error-floor`. The encoder warns about the budget in its
+  `[plan]` line. Use a smaller `--max-prims` (or a larger `--fit-width`), and keep
+  the stabilising terms on (`--colour-anchor`, `--min-coverage`).
+- **Colours or flat areas wrong on an NVIDIA GPU only:** check the
+  `[setup] warp renderer self-test` line says `ok`. If it does, run
+  `python tools/compare_devices.py <same input, output and options as encode.py> --iters 2000 --log compare.txt`.
+  It encodes on the GPU and repeats each step on the CPU from the same state;
+  lines marked `<-- DIFFERENT` (and the `FIRST DIFFERENCE` line at the end) show
+  which step goes wrong. `python tools/check_gpu.py file.jyvw` compares just the
+  renderers.
+- **The `[setup] training-error gradient self-test` line says MISMATCH:** the GPU
+  computes the training error's gradient differently from the CPU, so GPU encodes
+  would come out wrong (an earlier version hit this: PyTorch's `avg_pool2d`
+  gradient on CUDA was wrong for the SSIM term, giving garish colours and holes
+  in flat areas). Encode with `--device cpu` and report the line.
+- **Sending a log:** add `--log run.txt` to any command (encode.py, play.py,
+  shrink.py, the tools). The file gets the command line, folder and versions,
+  every console line and how the run ended; the console output is unchanged.
+- **A window reported as `damaged by later windows`:** raise `--replay`.
+- **Quality dropping during the log:** quality measured during the coarse stages
+  (lower resolution) reads higher than at full resolution, so a drop right after
+  a `[stage] resolution level 0` line is expected.
+
+## 8. Checking quality
 
 - **Encoder report:** quality per window at the end of every encode.
 - **Per second, against the source:**
@@ -395,7 +461,7 @@ the full file. Looping files stay looping.
 
 ---
 
-## 8. Blob model and file format
+## 9. Blob model and file format
 
 Each blob stores a centre, velocity, acceleration (curved paths), rotation and
 spin (twist), size and growth rate, colour and colour drift, a peak time `t0`

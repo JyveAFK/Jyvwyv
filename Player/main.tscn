@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://dwhu581wqg5s5"]
+
+[ext_resource type="Script" uid="uid://du1cps14hv3uw" path="res://jyvw/jyvw_player.gd" id="1"]
+
+[node name="JyvwPlayer" type="Control" unique_id=25613815]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1")
+jyvw_path = "res://data/dredd_cpu.jyvw"
+speed = 0.1

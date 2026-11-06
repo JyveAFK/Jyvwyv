@@ -56,8 +56,14 @@ Activate it again in every new terminal before running the scripts.
 
 ```
 python -m pip install --upgrade pip
-python -m pip install numpy pillow imageio imageio-ffmpeg
+python -m pip install numpy pillow imageio imageio-ffmpeg warp-lang zstandard
 ```
+
+- `warp-lang` is NVIDIA Warp: the encoder's fast renderer (compiled kernels on the
+  GPU, or on the CPU without one). Optional but strongly recommended; without it
+  the encoder falls back to a much slower plain-PyTorch renderer.
+- `zstandard` gives better file compression (zstd). Optional; without it files
+  use the built-in deflate compression. The Godot player reads both.
 
 Then install **PyTorch**:
 
@@ -84,8 +90,18 @@ Python that runs the scripts.
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-`True` at the end means the encoder will use the GPU, and it prints
-`device cuda` in its `[plan]` line when it starts. `--device cpu` forces the CPU.
+`True` at the end means the encoder will use the GPU. When it starts, the encoder
+checks the fast renderer against the reference one on your device and prints:
+
+```
+[setup] warp renderer self-test on cuda: image diff 3.0e-07, gradient diff 7.0e-07 -> ok
+[setup] device cuda, renderer warp
+```
+
+`renderer warp` means the fast renderer is in use. If the self-test reports
+`MISMATCH`, the encoder falls back to the slower `torch` renderer so results
+stay correct; please report that line (with your Warp version and GPU).
+`--device cpu` forces the CPU.
 
 ### ffmpeg
 
@@ -168,7 +184,7 @@ python encode.py anim.gif anim.jyvw --loop --fit-width 640 --iters 8000 --batch 
 | `--loop` | time wraps around: blobs near the end carry on into the start, so playback (including slow motion) is seamless through the loop point. The whole clip is fitted as one window |
 | `--fit-width 640` | set to the GIF's real width: fit at native resolution for maximum detail |
 | `--iters 8000 --batch 4` | the single window gets the whole budget; every frame is seen many times |
-| `--max-prims 20000 --spawn-count 400` | room for fine detail in the busy area |
+| `--max-prims 20000 --spawn-count 400` | room for fine detail in the busy area. Scale this with the picture: about 0.1-0.2 x fit width x fit height (20000 suits 640 wide; at `--fit-width 300` use about 5000-7500). Far more blobs than pixels can use only slows encoding |
 | `--densify-until 0.8` | keeps adding blobs for longer before switching to pure refinement |
 | `--min-size 0.8 --error-floor 0.01` | allows smaller blobs and chases smaller errors |
 | `--min-contrib 0.1` | gentler pruning, so fine detail isn't removed |
@@ -222,11 +238,47 @@ stray smudges. Raise it (3-4) for very dark footage; `--dark-boost 0` turns it
 off. The Godot debug view's **Coverage** mode shows thinly covered areas, which
 is where stragglers live.
 
+### Faster encodes
+
+- Install `warp-lang` (check for `renderer warp` in the `[setup]` line). It's the
+  biggest single speed-up, on the GPU or the CPU.
+- `--target-psnr 30` stops each window as soon as it reaches that quality,
+  instead of always running every `--iters` iteration. On a mostly static test
+  loop, a 32 dB target finished 43% sooner.
+- Coarse-to-fine is on by default (`--coarse-levels 2 --coarse-frac 0.3`); on a
+  6 s test clip it was 16% faster with no loss of quality.
+- Static backgrounds are detected automatically; on a test loop with a mostly
+  still frame that was 13% faster and gave a 16% smaller file.
+- A lower `--fit-width` costs roughly in proportion to its pixel count.
+
 ### Small files
 
 See [File size](#6-file-size).
 
 ---
+
+### Choosing `--max-prims` (how many blobs)
+
+Size the blob budget to the picture you fit, not the source video: aim for
+**0.1-0.2 blobs per pixel of fit width x fit height**. The fit height follows the
+source's shape (for example 300 wide at 2.4:1 is 300x125).
+
+| Fit size | Pixels | Lighter (0.1/px) | Good default | Maximum detail (0.2/px) |
+|---|---|---|---|---|
+| 300 x 125 (2.4:1) | 37,500 | 4,000 | 6,000 | 7,500 |
+| 320 x 180 (16:9) | 57,600 | 6,000 | 9,000 | 11,500 |
+| 640 x 360 (16:9) | 230,400 | 23,000 | 35,000 | 46,000 |
+| 640 x 266 (2.4:1) | 170,000 | 17,000 | 25,000 | 34,000 |
+
+- Fewer blobs: quicker encodes and smaller files, softer detail.
+- Beyond about 0.2 per pixel, extra blobs mostly add encoding time and file size,
+  not visible detail. Far beyond it (more blobs than the picture can use), flat
+  areas can become unstable; the encoder prints a note in its `[plan]` lines when
+  the budget is above 0.25 per pixel.
+- Want more detail than 0.2 per pixel gives? Raise `--fit-width` instead: at
+  600 wide the same density allows roughly four times as many blobs as at 300.
+- `--max-prims` limits the blobs being fitted at once (one window). Long videos
+  end up with more blobs in total, since each window adds its own.
 
 ## 4. Encoder settings
 
@@ -244,6 +296,11 @@ See [File size](#6-file-size).
 | Motion seeding | `--flow-radius` (block-match search for new blobs' velocity) |
 | Looping clips | `--loop` |
 | Long videos | `--segment` (window length), `--replay`, `--fade`, `--overlap` |
+| Encoding speed | `--coarse-levels`, `--coarse-frac` (low-resolution warm-up), `--patience`, `--min-improve`, `--target-psnr` (early stop), `--renderer` |
+| Static backgrounds | on by default: `--static-thresh`, `--no-static` |
+| Shared motion (groups) | on by default: `--group-tol`, `--group-min`, `--group-residual`, `--group-leave`, `--no-groups` |
+| Grainy / noisy sources | `--denoise 0.5` (off by default) |
+| Stable flat areas | `--colour-anchor`, `--colour-margin`, `--min-coverage`, `--coverage-weight` (on by default) |
 | Scene cuts | `--cut-thresh` (add `--cut-thresh 1` if flashes are mistaken for cuts) |
 | Dark scenes | `--dark-boost` |
 | Largest blob | `--max-window` (footprint in fit pixels; raise for big flat areas) |
@@ -252,36 +309,63 @@ See [File size](#6-file-size).
 ### How encoding works
 
 1. Frames are loaded at `--fit-width`, and hard scene cuts are detected.
-2. The clip is split into `--segment`-second windows (or one window with
+   Optionally (`--denoise`) a temporal denoiser smooths grain first.
+2. **Static areas:** for each scene, pixels that never change are found. Blobs
+   created there become *static blobs*: they last the whole scene with their
+   motion locked to zero, so a still background is fitted once rather than
+   rebuilt in every window.
+3. The clip is split into `--segment`-second windows (or one window with
    `--loop`). Each scene starts with a coarse grid of long-lived blobs.
-3. Each iteration renders random frames as time slices, compares them with the
-   source (L1 + SSIM, dark areas weighted by `--dark-boost`) and updates every
-   blob parameter.
-4. Every `--spawn-every` iterations a densify pass runs:
+4. **Coarse to fine:** the first `--coarse-frac` of each window's iterations run
+   at quarter and then half resolution (`--coarse-levels`), where each step is
+   far cheaper and the big structure settles; the rest run at full resolution.
+5. Each iteration renders random frames as time slices (with the Warp renderer
+   when installed), compares them with the source (L1 + SSIM, dark areas weighted
+   by `--dark-boost`) and updates every blob and group-track parameter. Two small
+   extra terms keep flat areas stable: a blob's colour may not stray more than
+   `--colour-margin` from the source colour at its centre (`--colour-anchor`), and
+   every pixel keeps at least `--min-coverage` total blob weight. Without them,
+   very dense blob budgets can drift into blobs with extreme colours that only
+   look right by cancelling each other out, which breaks up into speckles and
+   holes in flat areas.
+6. Every `--spawn-every` iterations a densify pass runs:
    - **prune:** remove blobs with negligible weight, plus blobs that decide fewer
      than `--min-contrib` pixels per frame (buried under others or redundant)
    - **merge:** pair up blobs that overlap in time, sit within `--merge-dist`
-     sizes of each other, differ in colour by less than `--merge-color` and move
-     together; each pair becomes one blob with their combined position, shape,
-     colour, motion and lifetime. A pass is undone if the error rises by more
-     than `--merge-tol`, and the merge rate then halves and recovers over later
-     passes.
+     sizes of each other, differ in colour by less than `--merge-color`, move
+     together and follow the same track; each pair becomes one blob. A pass is
+     undone if the error rises by more than `--merge-tol`, and the merge rate then
+     halves and recovers over later passes.
    - **split:** the highest-gradient blobs split in space, or in time if they
      live longer than `--split-life` (each half gets its own motion curve)
    - **spawn:** add blobs where the error is highest, with velocity seeded by
      block matching against the neighbouring frame
-
-   So detail can be absorbed into a larger blob and broken up again later if
-   the error asks for it. After `--densify-until`, only cleanup pruning continues.
-5. Blobs still alive at the end of a window carry into the next. Two rules stop a
-   later window from damaging time that's already been encoded:
+7. **Groups (shared motion):** a few times per window, blobs that move alike
+   (velocity within `--group-tol`, similar acceleration, around the same time)
+   form a group with its own motion track (position, velocity, acceleration,
+   rotation and spin). Members then store only their offset and shape relative
+   to the track, and a gentle pull (`--group-residual`) leaves the motion to the
+   track. Moving blobs can join an existing group they move with; a member whose
+   own motion grows past `--group-leave` leaves, and can form or join another
+   group later. A camera pan or a moving object can then be carried by one track.
+8. **Early stop:** once blobs stop being added and the window is at full
+   resolution, it ends when the loss improves by less than `--min-improve` over
+   `--patience` iterations, or when it reaches `--target-psnr`.
+9. Blobs still alive at the end of a window carry into the next. Several rules
+   stop a later window from damaging time that's already been encoded:
    - blobs created in a window reach back only as far as the previous window, and
      fade in over `--fade` seconds at that edge instead of extrapolating
    - each training frame has a `--replay` chance of being swapped for a frame from
      the previous window, so carried blobs keep matching what was encoded
+   - blobs already visible in encoded time are never pruned, merged, split or
+     regrouped (they still train)
+   - a group track used by finished blobs is locked; its carried members continue
+     with their own motion
 
    A window reported as `damaged by later windows` means raise `--replay`.
    Nothing crosses a hard scene cut.
+10. When saving, negligible motion and rate values are rounded to exact zero
+    (`--no-snap` to keep them), and the file is compressed.
 
 ---
 
@@ -300,19 +384,23 @@ This is the readable reference that the Godot GPU player matches (to within
 
 ## 6. File size
 
-Size is about 60 bytes per blob (96 with `--full`), plus a 40-byte header. Fewer
-blobs means a smaller file. In the encoder:
+Files are compressed (zstd with `zstandard` installed, otherwise deflate). Each
+blob takes about 64 bytes before compression (100 with `--full`); how much
+compression saves depends on the content: exact zeros (static blobs, group
+members with no motion of their own, snapped values) compress to almost nothing.
+Fewer blobs is still the main lever. In the encoder:
 
 | Setting | Effect |
 |---|---|
 | `--max-prims` lower | fewer blobs alive at once: the main size control |
 | `--spawn-count` lower, `--spawn-every` higher | blobs are added more slowly |
 | `--min-size` higher, `--blur`, `--error-floor` higher | less fine detail to chase |
-| `--fit-width` lower | less detail visible to the encoder |
+| `--fit-width` lower | less detail visible to the encoder (and faster) |
 | `--life` higher, `--smooth` higher | longer-lived, smoother blobs cover more frames each |
 | `--split-frac` lower | less splitting into smaller blobs |
 | `--merge-frac`, `--merge-color` higher | more blobs merged into larger ones |
 | `--min-contrib` higher | removes more low-value blobs |
+| groups and static detection (on by default) | motion stored once per track; static blobs carry no motion |
 
 From an existing file, without the source video:
 
@@ -322,7 +410,8 @@ python shrink.py big.jyvw small.jyvw --target-kb 500 --refit 1500
 python shrink.py old_full.jyvw same_compact.jyvw          # no flags: just converts to compact
 ```
 
-`shrink.py` keeps the most important blobs (weight x area x time on screen).
+`--target-kb` is measured before compression, so the file comes out at or under
+it. `shrink.py` keeps the most important blobs (weight x area x time on screen).
 With `--refit` it then re-optimises them to reproduce the original file's
 frames, so the big file stands in for the source video. On the test clip, half
 the blobs scored 21.9 dB without refit and 24.6 dB with it, against 25.4 dB for
@@ -330,7 +419,34 @@ the full file. Looping files stay looping.
 
 ---
 
-## 7. Checking quality
+## 7. Troubleshooting
+
+- **Speckles, harsh colours or black holes in flat areas:** usually far more blobs
+  than the picture needs (`--max-prims` well above 0.2 x fit width x fit height),
+  often with a low `--error-floor`. The encoder warns about the budget in its
+  `[plan]` line. Use a smaller `--max-prims` (or a larger `--fit-width`), and keep
+  the stabilising terms on (`--colour-anchor`, `--min-coverage`).
+- **Colours or flat areas wrong on an NVIDIA GPU only:** check the
+  `[setup] warp renderer self-test` line says `ok`. If it does, run
+  `python tools/compare_devices.py <same input, output and options as encode.py> --iters 2000 --log compare.txt`.
+  It encodes on the GPU and repeats each step on the CPU from the same state;
+  lines marked `<-- DIFFERENT` (and the `FIRST DIFFERENCE` line at the end) show
+  which step goes wrong. `python tools/check_gpu.py file.jyvw` compares just the
+  renderers.
+- **The `[setup] training-error gradient self-test` line says MISMATCH:** the GPU
+  computes the training error's gradient differently from the CPU, so GPU encodes
+  would come out wrong (an earlier version hit this: PyTorch's `avg_pool2d`
+  gradient on CUDA was wrong for the SSIM term, giving garish colours and holes
+  in flat areas). Encode with `--device cpu` and report the line.
+- **Sending a log:** add `--log run.txt` to any command (encode.py, play.py,
+  shrink.py, the tools). The file gets the command line, folder and versions,
+  every console line and how the run ended; the console output is unchanged.
+- **A window reported as `damaged by later windows`:** raise `--replay`.
+- **Quality dropping during the log:** quality measured during the coarse stages
+  (lower resolution) reads higher than at full resolution, so a drop right after
+  a `[stage] resolution level 0` line is expected.
+
+## 8. Checking quality
 
 - **Encoder report:** quality per window at the end of every encode.
 - **Per second, against the source:**
@@ -345,7 +461,7 @@ the full file. Looping files stay looping.
 
 ---
 
-## 8. Blob model and file format
+## 9. Blob model and file format
 
 Each blob stores a centre, velocity, acceleration (curved paths), rotation and
 spin (twist), size and growth rate, colour and colour drift, a peak time `t0`
@@ -366,9 +482,15 @@ Coordinates are normalised (x 0..1 across the width, y 0..height/width), so
 there's no built-in resolution. Times are in seconds as floats, so nothing is
 tied to the source frame rate.
 
-The format is documented at the top of `stsplat/io.py`: a 40-byte header
-(`JYVW`, version 2, flags for compact records and looping), then one 60-byte
-(compact) or 96-byte (full) record per blob, sorted by start time.
+Group members store their centre, motion and angle relative to their group's
+track; the track (position, velocity, acceleration, rotation, spin around its
+own reference time) is added on top: `world = track_pos(t) + rotate(track_angle(t), local_centre(t))`.
 
+The format (version 3) is documented at the top of `stsplat/io.py`: a 52-byte
+header, then a compressed block storing each value as its own column (start
+times as exact 0.1 ms steps, each relative to the previous blob), the group each
+blob follows, and the group tracks.
 
-This tool generated using Claude AI
+Version 2 `.jyvw` files and legacy `.stsp` files from earlier versions still load
+in every tool and in the Godot player. Re-encode them to get the later fixes; `shrink.py old.stsp
+new.jyvw` only converts the format.

@@ -39,11 +39,32 @@ def fmt_time(s):
     return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
 
 
+def _box_1d(x, dim, r):
+    """Mean over a window of +-r along dim, shrinking at the edges (cumulative sums)."""
+    n = x.shape[dim]
+    zero = torch.zeros_like(x.narrow(dim, 0, 1))
+    c = torch.cat([zero, torch.cumsum(x, dim)], dim)            # c[i] = sum of x[:i]
+    idx = torch.arange(n, device=x.device)
+    hi = (idx + r + 1).clamp(max=n)
+    lo = (idx - r).clamp(min=0)
+    shape = [1] * x.dim()
+    shape[dim] = n
+    cnt = (hi - lo).to(x.dtype).reshape(shape)
+    return (c.index_select(dim, hi) - c.index_select(dim, lo)) / cnt
+
+
+def box_mean(x, size=7):
+    """size x size box blur of an (H, W, C) image, edges averaged over the pixels
+    inside the image. Same as avg_pool2d(count_include_pad=False), but built from
+    plain ops: avg_pool2d's gradient on CUDA is wrong for some memory layouts in
+    some PyTorch builds, which wrecked GPU encodes."""
+    r = size // 2
+    return _box_1d(_box_1d(x, 0, r), 1, r)
+
+
 def ssim(a, b):
     """Simple SSIM on (H, W, 3) images, 7x7 box window."""
-    a = a.permute(2, 0, 1).unsqueeze(0)
-    b = b.permute(2, 0, 1).unsqueeze(0)
-    pool = lambda x: F.avg_pool2d(x, 7, 1, 3, count_include_pad=False)
+    pool = box_mean
     ma, mb = pool(a), pool(b)
     va = pool(a * a) - ma * ma
     vb = pool(b * b) - mb * mb
@@ -64,6 +85,28 @@ def dark_weight(tgt, boost):
 def weighted_l1(img, tgt, boost):
     w = dark_weight(tgt, boost)
     return ((img - tgt).abs().mean(-1) * w).sum() / w.sum()
+
+
+def loss_self_test(device, log, dark_boost=2.0, ssim_w=0.2):
+    """Check the training error's gradient on `device` against the CPU (the
+    renderer has its own self-test; this covers the SSIM / L1 code around it)."""
+    if str(device) == "cpu":
+        return True
+    g = torch.Generator().manual_seed(1)
+    img0 = torch.rand(48, 64, 3, generator=g)
+    tgt0 = torch.rand(48, 64, 3, generator=g)
+    grads = []
+    for dev in ("cpu", device):
+        img = img0.to(dev).clone().requires_grad_(True)
+        tgt = tgt0.to(dev)
+        l = (1 - ssim_w) * weighted_l1(img, tgt, dark_boost) + ssim_w * (1 - ssim(img, tgt))
+        l.backward()
+        grads.append(img.grad.detach().cpu())
+    d = float((grads[1] - grads[0]).norm() / grads[0].norm().clamp_min(1e-12))
+    ok = d < 1e-3
+    log(f"[setup] training-error gradient self-test on {device}: diff {d:.2e} -> "
+        + ("ok" if ok else "MISMATCH: GPU training will be wrong; please report this line (use --device cpu meanwhile)"))
+    return ok
 
 
 def psnr(mse):
@@ -198,7 +241,26 @@ class Encoder:
             fz = self.frozen_view
             parts.append({k: v.detach() for k, v in self.slice(fz[0], fz[1], t, fz[2]).items()})
         sl = R.concat_slices(*parts)
+        self.last_train_slice = parts[0] if self.P.n else None   # for the colour anchor
         return R.render(sl, self.W, self.H, max_window=self.a.max_window)
+
+    def colour_anchor(self, tgt):
+        """Mean difference between each visible trainable blob's colour and the
+        source colour at its centre. Keeps blobs from drifting to extreme colours
+        that only work by cancelling each other out."""
+        sl = self.last_train_slice
+        if sl is None:
+            return 0.0
+        alive = sl["weight"].detach() > 1e-3
+        if not bool(alive.any()):
+            return 0.0
+        m = sl["mean"][alive].detach() * self.W
+        x = m[:, 0].long().clamp(0, self.W - 1)
+        y = m[:, 1].long().clamp(0, self.H - 1)
+        diff = (sl["color"][alive] - tgt[y, x]).abs()
+        # only differences beyond a margin count: blobs on sharp edges legitimately
+        # differ from the colour at their centre, cancelling extremes differ a lot
+        return (diff - self.a.colour_margin).clamp_min(0).sum(1).mean()
 
     # -- initialisation -----------------------------------------------------
     def grid_init(self, frame_ids, scene):
@@ -226,7 +288,7 @@ class Encoder:
         if self.period > 0:
             # spread grid blobs around the loop so their wrap points (half a loop
             # from their centres) don't all land on the same moment
-            t0 = torch.rand(gx * gy, device=self.dev) * self.period
+            t0 = torch.rand(gx * gy).to(self.dev) * self.period    # CPU generator: same on every device
         rows = M.make_rows(xy, t0, life, size, rgb, self.dev, weight=0.3)
         static = self.is_static(scene, xy)
         if static.any():
@@ -280,15 +342,19 @@ class Encoder:
         p = (err.clamp_min(self.a.error_floor) - self.a.error_floor) ** 2
         if p.sum() <= 0:
             return 0
-        flat = torch.multinomial(p.reshape(-1), count, replacement=False) \
-            if count < (p > 0).sum() else (p.reshape(-1) > 0).nonzero().squeeze(1)[:count]
+        # sample on the CPU: the same random picks on every device (CUDA's
+        # sampler draws differently and has misbehaved with mostly-zero weights)
+        pc = p.reshape(-1).double().cpu()
+        flat = (torch.multinomial(pc, count, replacement=False) if count < int((pc > 0).sum())
+                else (pc > 0).nonzero().squeeze(1)[:count]).to(self.dev)
         hw = self.H * self.W
         s = flat // hw
         rem = flat % hw
         y = rem // self.W
         x = rem % self.W
-        xy = torch.stack([(x.float() + torch.rand_like(x.float())) / self.W,
-                          (y.float() + torch.rand_like(y.float())) / self.W], 1)
+        jitter = torch.rand(x.shape[0], 2).to(self.dev)
+        xy = torch.stack([(x.float() + jitter[:, 0]) / self.W,
+                          (y.float() + jitter[:, 1]) / self.W], 1)
         rgb = torch.stack([tgts[si][yi, xi] for si, yi, xi in zip(s.tolist(), y.tolist(), x.tolist())])
         t0 = torch.tensor([self.frame_time(pick[si]) for si in s.tolist()], device=self.dev)
         life = 1e4 if self.still else self.a.life
@@ -563,12 +629,18 @@ class Encoder:
         da, db = (ma - mu)[:, :, None], (mb - mu)[:, :, None]
         C = wa[:, :, None] * (cov(A, c) + da @ da.transpose(1, 2)) \
             + wb[:, :, None] * (cov(B, c) + db @ db.transpose(1, 2))
-        evals, evecs = torch.linalg.eigh(C)
+        # exact 2x2 eigen decomposition (identical on every device, unlike eigh)
+        cxx, cxy, cyy = C[:, 0, 0], C[:, 0, 1], C[:, 1, 1]
+        half = 0.5 * (cxx - cyy)
+        rad = torch.sqrt(half * half + cxy * cxy)
+        mid = 0.5 * (cxx + cyy)
+        major = (mid + rad).clamp_min(1e-12)
+        minor = (mid - rad).clamp_min(1e-12)
         new = torch.zeros(len(chosen), M.D, device=self.dev)
         new[:, M.MU] = mu
         new[:, M.T0] = tmc
-        new[:, M.LOG_S] = evals.clamp_min(1e-12).sqrt().log()
-        new[:, M.THETA] = torch.atan2(evecs[:, 1, 0], evecs[:, 0, 0])
+        new[:, M.LOG_S] = torch.stack([major, minor], 1).sqrt().log()
+        new[:, M.THETA] = 0.5 * torch.atan2(2 * cxy, cxx - cyy)      # direction of the major axis
         new[:, M.COL] = M.logit(wa * A["color"][c] + wb * B["color"][c])
         new[:, M.OP] = M.logit(torch.maximum(torch.sigmoid(r[i, M.OP]), torch.sigmoid(r[j, M.OP])))
         if not self.still:
@@ -582,6 +654,8 @@ class Encoder:
             new[:, M.LOG_ST] = var_t.sqrt().clamp(a.min_life, a.max_life).log()
         else:
             new[:, M.LOG_ST] = math.log(1e4)
+        if not self.still and P.static[i].any():
+            new[P.static[i], M.LOG_ST] = math.log(1e4)   # static blobs live for the whole scene
         bi, bj = P.bounds[i], P.bounds[j]
         first = (bi[:, 0] <= bj[:, 0])[:, None]
         nb = torch.where(first, bi, bj).clone()
@@ -767,6 +841,59 @@ class Encoder:
         r[:, M.COL].clamp_(-8, 8)
 
     # -- main loop ----------------------------------------------------------
+    def train_step(self, batch, lr, scene):
+        """One optimiser iteration over the given frames. Returns (loss, mean MSE)."""
+        a = self.a
+        self.P.raw.requires_grad_(True)
+        has_groups = self.P.groups.shape[0] > 0
+        if has_groups:
+            self.P.groups.requires_grad_(True)
+        loss = 0.0
+        mse_sum = 0.0
+        for i in batch:
+            img, total = self.render_frame(i)
+            tgt = self.target(i)
+            l1 = weighted_l1(img, tgt, a.dark_boost)
+            l = (1 - a.ssim) * l1
+            if a.ssim > 0:
+                l = l + a.ssim * (1 - ssim(img, tgt))
+            if a.colour_anchor > 0:
+                l = l + a.colour_anchor * self.colour_anchor(tgt)
+            if a.min_coverage > 0:
+                # keep every pixel properly covered: thinly covered pixels let a
+                # single stray blob decide their colour, or fade to black
+                l = l + a.coverage_weight * (a.min_coverage - total).clamp_min(0).mean()
+            loss = loss + l / len(batch)
+            mse_sum += float(((img.detach() - tgt) ** 2).mean())
+        if not self.still and a.smooth > 0 and self.P.n:
+            r = self.P.raw
+            reg = (r[:, M.ACC] ** 2).sum(1).mean() + 0.1 * (r[:, M.ANG] ** 2).mean() \
+                + 0.1 * (r[:, M.SRATE] ** 2).sum(1).mean() + 0.1 * (r[:, M.CRATE] ** 2).sum(1).mean()
+            loss = loss + a.smooth * reg
+        if has_groups and a.group_residual > 0:
+            # members should leave the motion to their track: keep their own motion small
+            member = self.P.parent >= 0
+            if member.any():
+                r = self.P.raw[member]
+                # L1 pull: drives a member's own motion to exactly zero where the
+                # track already explains it (zeros compress to almost nothing)
+                res = r[:, M.VEL].abs().sum(1).mean() + 0.5 * r[:, M.ACC].abs().sum(1).mean() \
+                    + 0.1 * r[:, M.ANG].abs().mean()
+                loss = loss + a.group_residual * res
+        loss.backward()
+        grad = self.P.raw.grad
+        self.P.raw = self.P.raw.detach()
+        ggrad = None
+        if has_groups:
+            ggrad = self.P.groups.grad
+            self.P.groups = self.P.groups.detach()
+        with torch.no_grad():
+            self.P.adam_step(grad, lr, self.col_mask)
+            if ggrad is not None:
+                self.P.group_adam_step(ggrad, lr)
+        self.clamp(scene)
+        return float(loss.detach()), mse_sum / len(batch)
+
     def fit_segment(self, si, nseg, scene, frame_ids, train_ids, iters, t_start, replay_ids=()):
         a = self.a
         log(f"[segment {si + 1}/{nseg}] frames {frame_ids[0]}..{frame_ids[-1]} "
@@ -800,56 +927,17 @@ class Encoder:
             elif it == 1 and lv:
                 log(f"  [stage] resolution level {lv}: fitting at {self.W}x{self.H}")
             lr = a.lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * it / iters)))
-            self.P.raw.requires_grad_(True)
-            has_groups = self.P.groups.shape[0] > 0
-            if has_groups:
-                self.P.groups.requires_grad_(True)
             batch = random.sample(train_ids, min(a.batch, len(train_ids)))
             # replay: re-check already-encoded frames so carried blobs don't drift
             # and new blobs can't leave junk behind in earlier time
             if replay_ids:
                 batch = [random.choice(replay_ids) if random.random() < a.replay else i for i in batch]
-            loss = 0.0
-            mse_sum = 0.0
-            for i in batch:
-                img, _ = self.render_frame(i)
-                tgt = self.target(i)
-                l1 = weighted_l1(img, tgt, a.dark_boost)
-                l = (1 - a.ssim) * l1
-                if a.ssim > 0:
-                    l = l + a.ssim * (1 - ssim(img, tgt))
-                loss = loss + l / len(batch)
-                mse_sum += float(((img.detach() - tgt) ** 2).mean())
-            if not self.still and a.smooth > 0 and self.P.n:
-                r = self.P.raw
-                reg = (r[:, M.ACC] ** 2).sum(1).mean() + 0.1 * (r[:, M.ANG] ** 2).mean() \
-                    + 0.1 * (r[:, M.SRATE] ** 2).sum(1).mean() + 0.1 * (r[:, M.CRATE] ** 2).sum(1).mean()
-                loss = loss + a.smooth * reg
-            if has_groups and a.group_residual > 0:
-                # members should leave the motion to their track: keep their own motion small
-                member = self.P.parent >= 0
-                if member.any():
-                    r = self.P.raw[member]
-                    # L1 pull: drives a member's own motion to exactly zero where the
-                    # track already explains it (zeros compress to almost nothing)
-                    res = r[:, M.VEL].abs().sum(1).mean() + 0.5 * r[:, M.ACC].abs().sum(1).mean() \
-                        + 0.1 * r[:, M.ANG].abs().mean()
-                    loss = loss + a.group_residual * res
-            loss.backward()
-            grad = self.P.raw.grad
-            self.P.raw = self.P.raw.detach()
-            ggrad = None
-            if has_groups:
-                ggrad = self.P.groups.grad
-                self.P.groups = self.P.groups.detach()
-            with torch.no_grad():
-                self.P.adam_step(grad, lr, self.col_mask)
-                if ggrad is not None:
-                    self.P.group_adam_step(ggrad, lr)
-            self.clamp(scene)
-            loss_hist.append(float(loss.detach()))
-            mse_hist.append(mse_sum / len(batch))
-            if self.level == 0:
+            loss, mse_val = self.train_step(batch, lr, scene)
+            loss_hist.append(loss)
+            mse_hist.append(mse_val)
+            # losses for early stopping: full resolution, after blobs stop being added
+            # (while densifying the loss jumps around and would trigger a false stop)
+            if self.level == 0 and it >= iters * a.densify_until:
                 full_losses.append(loss_hist[-1])
 
             densify_phase = it < iters * a.densify_until
@@ -947,6 +1035,11 @@ class Encoder:
                     self.static_masks[sc] = m
                     log(f"[static] scene {self.frame_time(ids_[0]):.2f}-{self.frame_time(ids_[-1]):.2f}s: "
                         f"{100 * float(m.float().mean()):.0f}% of the frame never changes")
+        per_px = a.max_prims / (self.W0 * self.H0)
+        if per_px > 0.25:
+            log(f"[plan] note: --max-prims {a.max_prims} is {per_px:.2f} blobs per pixel at "
+                f"{self.W0}x{self.H0}; beyond about 0.25 extra blobs add little detail and slow "
+                f"encoding (consider --max-prims {int(0.2 * self.W0 * self.H0)} or a larger --fit-width)")
         self.iters_total = len(segs) * a.iters
         self.iters_done = 0
         self.frozen_view = (self.P.frozen, self.P.frozen_bounds, self.P.frozen_parent)
@@ -1057,7 +1150,7 @@ class Encoder:
 
 
 # ---------------------------------------------------------------------------
-def main():
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("input", help="video file, image file, or folder of images")
     p.add_argument("output", help="output .jyvw file")
@@ -1087,6 +1180,10 @@ def main():
     g.add_argument("--merge-color", type=float, default=0.06, help="merge only blobs whose colours differ by less than this (0..1.7)")
     g.add_argument("--merge-tol", type=float, default=0.01, help="undo a merge pass if it raises the error by more than this fraction")
     g.add_argument("--dark-boost", type=float, default=2.0, help="extra weight on errors in dark areas (0 = none)")
+    g.add_argument("--colour-anchor", type=float, default=0.05, help="pull each blob's colour toward the source colour at its centre (stops extreme colours cancelling out; 0 = off)")
+    g.add_argument("--colour-margin", type=float, default=0.3, help="colour difference (0..1 per channel) a blob may have from its spot before the anchor pulls")
+    g.add_argument("--min-coverage", type=float, default=0.2, help="total blob weight every pixel should keep (prevents holes; 0 = off)")
+    g.add_argument("--coverage-weight", type=float, default=0.1, help="strength of the --min-coverage penalty")
     g = p.add_argument_group("static areas and shared motion")
     g.add_argument("--no-static", dest="static", action="store_false", help="don't detect static areas")
     g.add_argument("--static-thresh", type=float, default=0.03, help="brightness change (0..1) below which a pixel counts as static for its whole scene")
@@ -1129,7 +1226,14 @@ def main():
     g.add_argument("--log-every", type=int, default=50)
     g.add_argument("--preview-every", type=int, default=0, help="save target|render PNGs every N iterations (0 = only at the end)")
     g.add_argument("--preview-dir", default="", help="where previews go (default: <output>_preview)")
-    a = p.parse_args()
+    p.add_argument("--log", default="", help="also write everything printed (command line, all progress lines, final report) to this text file")
+    return p
+
+
+def main():
+    a = build_parser().parse_args()
+    from stsplat import logfile
+    logfile.start(a.log)
 
     random.seed(a.seed)
     torch.manual_seed(a.seed)
@@ -1139,7 +1243,8 @@ def main():
     a.preview_dir = a.preview_dir or os.path.splitext(a.output)[0] + "_preview"
     os.makedirs(a.preview_dir, exist_ok=True)
 
-    backend = R.set_backend(a.renderer)
+    backend = R.set_backend(a.renderer, dev, log)
+    loss_self_test(dev, log)
     log(f"[setup] device {dev}, renderer {backend}"
         + ("" if backend == "warp" else " (install warp-lang for a much faster renderer)"))
     log(f"[load] {a.input}")

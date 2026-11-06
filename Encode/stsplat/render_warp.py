@@ -87,6 +87,18 @@ if AVAILABLE:
                 wp.atomic_add(g_conic, j, wp.vec3(dq * dx * dx, dq * 2.0 * dx * dy, dq * dy * dy))
 
 
+def _launch_args(t):
+    """Device and stream for a launch on tensor t's device.
+
+    On CUDA, Warp must run on PyTorch's current stream: by default it uses its own,
+    and then PyTorch can read (or clear) a buffer before Warp has written it,
+    which gives partly-rendered frames and wrong gradients.
+    """
+    if t.is_cuda:
+        return dict(device=wp.device_from_torch(t.device), stream=wp.stream_from_torch(t.device))
+    return dict(device=wp.device_from_torch(t.device))
+
+
 def _bin(mean, scale, theta, width, height):
     """Assign blobs to the 16x16 tiles their 3-sigma ellipse touches.
 
@@ -131,12 +143,14 @@ def _bin(mean, scale, theta, width, height):
 class _Splat(torch.autograd.Function):
     @staticmethod
     def forward(ctx, mean, conic3, color, weight, offsets, lists, width, height, tiles_x):
-        mean = mean.contiguous().float()
-        conic3 = conic3.contiguous().float()
-        color = color.contiguous().float()
-        weight = weight.contiguous().float()
+        # detached copies for Warp: it computes no gradients itself (backward() below
+        # does), and handing it graph tensors only triggers a PyTorch .grad warning
+        mean = mean.detach().contiguous().float()
+        conic3 = conic3.detach().contiguous().float()
+        color = color.detach().contiguous().float()
+        weight = weight.detach().contiguous().float()
         out = torch.zeros(height * width, 4, device=mean.device)
-        wp.launch(_forward, dim=height * width, device=wp.device_from_torch(mean.device), inputs=[
+        wp.launch(_forward, dim=height * width, **_launch_args(mean), inputs=[
             wp.from_torch(mean, dtype=wp.vec2), wp.from_torch(conic3, dtype=wp.vec3),
             wp.from_torch(color, dtype=wp.vec3), wp.from_torch(weight),
             wp.from_torch(offsets), wp.from_torch(lists), width, tiles_x,
@@ -153,11 +167,11 @@ class _Splat(torch.autograd.Function):
         g_conic = torch.zeros_like(conic3)
         g_color = torch.zeros_like(color)
         g_weight = torch.zeros_like(weight)
-        wp.launch(_backward, dim=height * width, device=wp.device_from_torch(mean.device), inputs=[
+        wp.launch(_backward, dim=height * width, **_launch_args(mean), inputs=[
             wp.from_torch(mean, dtype=wp.vec2), wp.from_torch(conic3, dtype=wp.vec3),
             wp.from_torch(color, dtype=wp.vec3), wp.from_torch(weight),
             wp.from_torch(offsets), wp.from_torch(lists), width, tiles_x,
-            wp.from_torch(grad_out.contiguous().float(), dtype=wp.vec4),
+            wp.from_torch(grad_out.detach().contiguous().float(), dtype=wp.vec4),
             wp.from_torch(g_mean, dtype=wp.vec2), wp.from_torch(g_conic, dtype=wp.vec3),
             wp.from_torch(g_color, dtype=wp.vec3), wp.from_torch(g_weight)])
         return g_mean, g_conic, g_color, g_weight, None, None, None, None, None

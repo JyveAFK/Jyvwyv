@@ -19,7 +19,7 @@ import torch
 from stsplat import io as SIO
 from stsplat import model as M
 from stsplat import render as R
-R.set_backend("auto")
+R.set_backend("auto", "cpu", print)
 
 
 def main():
@@ -29,7 +29,10 @@ def main():
     p.add_argument("--width", type=int, default=320, help="evaluation width")
     p.add_argument("--every", type=int, default=1, help="evaluate every Nth source frame")
     p.add_argument("--start", type=float, default=0, help="same --start used when encoding")
+    p.add_argument("--log", default="", help="also write everything printed (command line, all progress lines, final report) to this text file")
     a = p.parse_args()
+    from stsplat import logfile
+    logfile.start(a.log)
 
     d = SIO.load_jyvw(a.jyvw)
     fr = SIO.load(a.source, a.width, start=a.start, max_seconds=d["duration"], log=lambda m: None)

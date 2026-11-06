@@ -19,7 +19,6 @@ from PIL import Image
 
 from stsplat import model as M
 from stsplat import render as R
-R.set_backend("auto")
 from stsplat import io as SIO
 
 
@@ -75,9 +74,13 @@ def main():
     p.add_argument("--end", type=float, default=0.0, help="end time (0 = end of clip)")
     p.add_argument("--time", type=float, default=None, help="render a single slice at this time")
     p.add_argument("--device", default="auto")
+    p.add_argument("--log", default="", help="also write everything printed (command line, all progress lines, final report) to this text file")
     a = p.parse_args()
+    from stsplat import logfile
+    logfile.start(a.log)
 
     dev = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
+    R.set_backend("auto", dev, log)
     pl = Player(a.input, dev)
     log(f"[load] {a.input}: {pl.rows.shape[0]} blobs, source {pl.src[0]}x{pl.src[1]}, "
         f"{pl.duration:.2f}s @ {pl.fps:.2f} fps")
