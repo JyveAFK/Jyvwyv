@@ -370,6 +370,5 @@ The format is documented at the top of `stsplat/io.py`: a 40-byte header
 (`JYVW`, version 2, flags for compact records and looping), then one 60-byte
 (compact) or 96-byte (full) record per blob, sorted by start time.
 
-Legacy `.stsp` files from the first version still load in every tool and in the
-Godot player. Re-encode them to get the later fixes; `shrink.py old.stsp
-new.jyvw` only converts the format.
+
+This tool generated using Claude AI
