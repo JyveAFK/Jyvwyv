@@ -12,6 +12,28 @@ this keeps the cost proportional to the area actually covered.
 import torch
 
 WINDOWS = (8, 16, 32, 64, 128, 256, 512, 1024)
+
+_BACKEND = "torch"
+
+
+def set_backend(name="auto"):
+    """Choose the renderer: "warp" (fast compiled kernels, pip install warp-lang),
+    "torch" (plain PyTorch, always available) or "auto" (warp if it is installed).
+    Returns the backend actually in use."""
+    global _BACKEND
+    if name in ("auto", "warp"):
+        try:
+            from . import render_warp
+            ok = render_warp.AVAILABLE
+        except Exception:
+            ok = False
+        if ok:
+            _BACKEND = "warp"
+            return _BACKEND
+        if name == "warp":
+            raise RuntimeError("--renderer warp needs NVIDIA Warp: python -m pip install warp-lang")
+    _BACKEND = "torch"
+    return _BACKEND
 CUTOFF = 3.0   # blobs are evaluated out to 3 sigma
 
 
@@ -82,6 +104,9 @@ def render(sl, width, height, max_window=256, eps=1e-6, chunk_pixels=4_000_000):
     sl: output of model.slice_at (may be a concatenation of several sets).
     Returns (rgb, total weight per pixel).
     """
+    if _BACKEND == "warp":
+        from . import render_warp
+        return render_warp.render(sl, width, height, eps)
     device = sl["mean"].device
     hw = height * width
     acc = torch.zeros(hw + 1, 4, device=device)       # last row is a dump slot

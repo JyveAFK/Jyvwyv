@@ -6,11 +6,11 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-// Blob records as raw 32-bit words: 24 x f32 (full) or 15 words (compact: 6 x f32 + 18 x f16).
-// Layout documented in jyvw_file.gd.
+// Blob columns as raw 32-bit words (one column per value; layout in jyvw_file.gd):
+// 6 f32 columns, 18 data columns (f16 pairs when compact, else f32), 1 i32 parent column.
 layout(set = 0, binding = 0, std430) restrict readonly buffer Blobs { uint d[]; } blobs;
 // 4 vec4 per blob: (mean.x, mean.y, conic.a, conic.b), (conic.c, weight, life, id bits),
-//                  (rgb, -), (velocity px/s, -, -)   [life = (t - t0) / temporal sigma]
+//                  (rgb, parent group), (velocity px/s, -, -)   [life = (t - t0) / temporal sigma]
 layout(set = 0, binding = 1, std430) restrict writeonly buffer Sliced { vec4 s[]; } sliced;
 layout(set = 0, binding = 2, std430) restrict buffer Counts { uint c[]; } counts;
 layout(set = 0, binding = 3, std430) restrict writeonly buffer Lists { uint l[]; } lists;
@@ -34,32 +34,49 @@ layout(push_constant, std430) uniform Params {
 	uint flags;       // debug flags (bit 2 = motion arrows: widen bins to fit them)
 	float arrow_secs; // arrow length in seconds of motion
 	float period;     // > 0: looping clip, time wraps with this period
+	uint group_count; // number of group tracks
+	uint pad0;
+	uint pad1;
+	uint pad2;
 } pc;
+
+// Group tracks: 9 columns of group_count floats (t0, pos.xy, vel.xy, acc.xy, rot, spin)
+layout(set = 0, binding = 5, std430) restrict readonly buffer Groups { float g[]; } groups;
 
 const float CUTOFF = 3.0;
 const uint TILE = 16u;
 const float GROW_LIMIT = 1.3862944;   // ln(4): matches model.py
 
-// full-record field index -> position among the compact record's 16-bit values (-1 = 32-bit)
-const int HALF_SLOT[24] = int[24](-1, -1, -1, 0, -1, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-                                  11, 12, 13, 14, 15, 16, 17, -1);
-// full-record field index -> position among the compact record's 32-bit values
-const int F32_SLOT[24] = int[24](0, 1, 2, -1, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-                                 -1, -1, -1, -1, -1, -1, -1, 3);
+// full-record field index -> column (0-5 are f32 columns, 6-23 data columns)
+const uint FIELD_COL[24] = uint[24](0u, 1u, 2u, 6u, 4u, 5u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u,
+                                    15u, 16u, 17u, 18u, 19u, 20u, 21u, 22u, 23u, 3u);
 
-// Read field k (full-record numbering) of blob i, whichever layout the file uses.
+// words per data column
+uint data_stride() {
+	return pc.compact != 0u ? (pc.count + (pc.count & 1u)) / 2u : pc.count;
+}
+
+// Read field k (full-record numbering) of blob i.
 float B(uint i, uint k) {
+	uint c = FIELD_COL[k];
+	uint n = pc.count;
+	if (c < 6u) {
+		return uintBitsToFloat(blobs.d[c * n + i]);
+	}
+	uint base = 6u * n + (c - 6u) * data_stride();
 	if (pc.compact == 0u) {
-		return uintBitsToFloat(blobs.d[i * 24u + k]);
+		return uintBitsToFloat(blobs.d[base + i]);
 	}
-	uint base = i * 15u;
-	int f = F32_SLOT[k];
-	if (f >= 0) {
-		return uintBitsToFloat(blobs.d[base + uint(f)]);
-	}
-	uint h = uint(HALF_SLOT[k]);
-	vec2 pair = unpackHalf2x16(blobs.d[base + 6u + h / 2u]);
-	return (h & 1u) == 0u ? pair.x : pair.y;
+	vec2 pair = unpackHalf2x16(blobs.d[base + i / 2u]);
+	return (i & 1u) == 0u ? pair.x : pair.y;
+}
+
+int parent_of(uint i) {
+	return int(blobs.d[6u * pc.count + 18u * data_stride() + i]);
+}
+
+float G(uint gi, uint k) {
+	return groups.g[k * pc.group_count + gi];
 }
 
 void main() {
@@ -85,9 +102,27 @@ void main() {
 
 	vec2 mu = vec2(B(o, 4u), B(o, 5u)) + vec2(B(o, 6u), B(o, 7u)) * dt
 	        + 0.5 * vec2(B(o, 8u), B(o, 9u)) * dt * dt;
+	vec2 vel_n = vec2(B(o, 6u), B(o, 7u)) + vec2(B(o, 8u), B(o, 9u)) * dt;
+	float g_angle = 0.0;
+	int parent = parent_of(i);
+	if (parent >= 0 && uint(parent) < pc.group_count) {
+		// follow the group track: centre and angle are relative to it (matches model.slice_at)
+		uint gi = uint(parent);
+		float dg = pc.t - G(gi, 0u);
+		if (pc.period > 0.0) {
+			dg -= pc.period * floor(dg / pc.period + 0.5);
+		}
+		vec2 gpos = vec2(G(gi, 1u), G(gi, 2u)) + vec2(G(gi, 3u), G(gi, 4u)) * dg
+		          + 0.5 * vec2(G(gi, 5u), G(gi, 6u)) * dg * dg;
+		vec2 gvel = vec2(G(gi, 3u), G(gi, 4u)) + vec2(G(gi, 5u), G(gi, 6u)) * dg;
+		g_angle = G(gi, 7u) + G(gi, 8u) * dg;
+		float gc = cos(g_angle), gs = sin(g_angle);
+		mu = gpos + vec2(gc * mu.x - gs * mu.y, gs * mu.x + gc * mu.y);
+		vel_n = gvel + vec2(gc * vel_n.x - gs * vel_n.y, gs * vel_n.x + gc * vel_n.y);
+	}
 	vec2 grow = clamp(vec2(B(o, 12u), B(o, 13u)) * dt, -GROW_LIMIT, GROW_LIMIT);
 	vec2 sc = exp(vec2(B(o, 10u), B(o, 11u)) + grow) * pc.scale_px;
-	float th = B(o, 14u) + B(o, 15u) * dt;
+	float th = B(o, 14u) + B(o, 15u) * dt + g_angle;
 	vec3 col = 1.0 / (1.0 + exp(-(vec3(B(o, 16u), B(o, 17u), B(o, 18u))
 	                             + vec3(B(o, 19u), B(o, 20u), B(o, 21u)) * dt)));
 
@@ -104,7 +139,7 @@ void main() {
 	vec2 lo = m - ext;
 	vec2 hi = m + ext;
 	if ((pc.flags & 4u) != 0u) {   // debug arrows extend past the blob: bin them too
-		vec2 tip = m + (vec2(B(o, 6u), B(o, 7u)) + vec2(B(o, 8u), B(o, 9u)) * dt) * pc.scale_px * pc.arrow_secs;
+		vec2 tip = m + vel_n * pc.scale_px * pc.arrow_secs;
 		lo = min(lo, tip);
 		hi = max(hi, tip);
 	}
@@ -115,10 +150,10 @@ void main() {
 	int tx1 = clamp(int(floor(hi.x / float(TILE))), 0, int(pc.tiles_x) - 1);
 	int ty1 = clamp(int(floor(hi.y / float(TILE))), 0, int(pc.tiles_y) - 1);
 
-	vec2 vel = (vec2(B(o, 6u), B(o, 7u)) + vec2(B(o, 8u), B(o, 9u)) * dt) * pc.scale_px;
+	vec2 vel = vel_n * pc.scale_px;
 	sliced.s[i * 4u + 0u] = vec4(m, ca, cb);
 	sliced.s[i * 4u + 1u] = vec4(cd, w, dt / st, uintBitsToFloat(i));
-	sliced.s[i * 4u + 2u] = vec4(col, 0.0);
+	sliced.s[i * 4u + 2u] = vec4(col, float(parent));
 	sliced.s[i * 4u + 3u] = vec4(vel, 0.0, 0.0);
 	atomicAdd(stats.live, 1u);
 

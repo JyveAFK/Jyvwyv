@@ -46,9 +46,10 @@ Press **D**, or set `debug_enabled` on the player, to open the debug panel.
 | View: Coverage | total blob weight per pixel, log scale. Black/blue = barely covered, so one faint blob decides the colour there (where stragglers live). Yellow/white = many blobs |
 | View: Dominant blob | each pixel coloured by the blob with the most weight there |
 | View: Life stage | green = fading in, white = at peak, red = fading out |
-| Outlines | ellipse at 1, 2 or 3 sigma, in white, blob colour or a unique colour per blob; fades with the blob's weight |
+| View: Groups | each pixel coloured by the group track its dominant blob follows; grey = blobs moving on their own |
+| Outlines | ellipse at 1, 2 or 3 sigma, in white, blob colour, a unique colour per blob, or its group's colour; fades with the blob's weight |
 | Centres / Motion arrows | centre dots; arrows show 0.25 s of travel at the current velocity |
-| Click the image | selects the blob that dominates that pixel: cyan outline, plus its stored and current values in the panel |
+| Click the image | selects the blob that dominates that pixel: cyan outline, plus its stored and current values and the group it follows |
 | Trail | the selected blob's whole path (cyan = past, white = future, green/red = birth/death) |
 | Timeline | live blobs across the clip, the selected blob's lifetime in cyan; click or drag to scrub |
 | GPU timings | milliseconds for the slice+bin and raster passes |
@@ -64,9 +65,10 @@ resolution, live blobs, and the busiest tile. If it reports **OVERFLOW**, raise
 ## Files
 
 ```
-jyvw/jyvw_file.gd          loads the header and raw blob bytes: full, compact and legacy .stsp
+jyvw/jyvw_file.gd          loads .jyvw v3 (decompresses zstd/deflate, rebuilds start times), v2 and legacy .stsp,
+                           into one column-per-value layout uploaded straight to the GPU
 jyvw/jyvw_renderer.gd      RenderingDevice resources + per-frame dispatch (reusable)
-jyvw/jyvw_slice_bin.glsl   pass 1: slice each blob at t, bin it into 16x16 tiles
+jyvw/jyvw_slice_bin.glsl   pass 1: slice each blob at t (applying its group track), bin it into 16x16 tiles
 jyvw/jyvw_raster.glsl      pass 2: per tile, sum(w*rgb)/sum(w) into an RGBA8 texture
 jyvw/jyvw_player.gd        player Control: playback, input, HUD, drag-and-drop
 jyvw/jyvw_debug.gd         debug panel, blob inspector + trail, timeline, GPU timings

@@ -15,10 +15,10 @@ var is_local := false
 var tile_cap := 1024          ## max blobs per 16x16 tile; raise if the HUD reports overflow
 var background := Color.BLACK
 
-## Debug view (see jyvw_raster.glsl): 0 image, 1 coverage, 2 dominant blob, 3 life stage
-enum { MODE_IMAGE, MODE_COVERAGE, MODE_DOMINANT, MODE_LIFE }
+## Debug view (see jyvw_raster.glsl): 0 image, 1 coverage, 2 dominant blob, 3 life stage, 4 groups
+enum { MODE_IMAGE, MODE_COVERAGE, MODE_DOMINANT, MODE_LIFE, MODE_GROUPS }
 enum { FLAG_OUTLINES = 1, FLAG_CENTRES = 2, FLAG_ARROWS = 4, FLAG_PICK = 8,
-	FLAG_RING_BLOB_COLOUR = 16, FLAG_RING_ID_COLOUR = 32 }
+	FLAG_RING_BLOB_COLOUR = 16, FLAG_RING_ID_COLOUR = 32, FLAG_RING_GROUP_COLOUR = 64 }
 const NO_BLOB := 0xFFFFFFFF
 var debug_mode := MODE_IMAGE
 var debug_flags := 0
@@ -34,6 +34,7 @@ var tiles_y := 0
 var count := 0
 var compact := false
 var period := 0.0              ## > 0 for looping files
+var group_count := 0
 var out_tex := RID()          ## RGBA8 texture holding the last rendered frame
 
 var _shader_slice := RID()
@@ -48,6 +49,7 @@ var _lists := RID()
 var _set_slice := RID()
 var _set_raster := RID()
 var _pick := RID()
+var _groups := RID()
 var _retired: Array = []       ## [rid, frames_left] freed a few frames later (Texture2DRD may still use them)
 
 
@@ -70,8 +72,14 @@ func setup(file: JyvwFile) -> String:
 	count = file.count
 	compact = file.compact
 	period = file.period()
-	print("[jyvw] uploading %d blobs (%.1f KiB) to the GPU" % [count, file.blob_bytes.size() / 1024.0])
-	_blobs = rd.storage_buffer_create(file.blob_bytes.size(), file.blob_bytes)
+	group_count = file.group_count
+	print("[jyvw] uploading %d blobs (%.1f KiB) and %d group tracks to the GPU" %
+		[count, file.gpu_bytes.size() / 1024.0, group_count])
+	_blobs = rd.storage_buffer_create(file.gpu_bytes.size(), file.gpu_bytes)
+	var gbytes := file.groups.to_byte_array()
+	if gbytes.size() < 16:
+		gbytes.resize(16)        # storage buffers can't be empty
+	_groups = rd.storage_buffer_create(gbytes.size(), gbytes)
 	_sliced = rd.storage_buffer_create(maxi(count, 1) * 64)
 	_stats = rd.storage_buffer_create(16)
 	print("[jyvw] renderer ready in %d ms" % (Time.get_ticks_msec() - t0))
@@ -118,7 +126,7 @@ func resize(w: int, h: int) -> void:
 
 	_set_slice = rd.uniform_set_create([
 		_buf_uniform(0, _blobs), _buf_uniform(1, _sliced), _buf_uniform(2, _counts),
-		_buf_uniform(3, _lists), _buf_uniform(4, _stats)], _shader_slice, 0)
+		_buf_uniform(3, _lists), _buf_uniform(4, _stats), _buf_uniform(5, _groups)], _shader_slice, 0)
 	var img := RDUniform.new()
 	img.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 	img.binding = 3
@@ -148,7 +156,7 @@ func render(t: float) -> void:
 	rd.buffer_clear(_stats, 0, 16)
 
 	var pc1 := PackedByteArray()
-	pc1.resize(48)
+	pc1.resize(64)
 	pc1.encode_float(0, t)
 	pc1.encode_float(4, float(width))
 	pc1.encode_u32(8, width)
@@ -161,6 +169,7 @@ func render(t: float) -> void:
 	pc1.encode_u32(36, debug_flags)
 	pc1.encode_float(40, arrow_secs)
 	pc1.encode_float(44, period)
+	pc1.encode_u32(48, group_count)
 
 	var pc2 := PackedByteArray()
 	pc2.resize(64)
@@ -257,7 +266,7 @@ func free_all() -> void:
 	for e in _retired:
 		rd.free_rid(e[0])
 	_retired.clear()
-	for rid in [out_tex, _counts, _lists, _pick, _blobs, _sliced, _stats,
+	for rid in [out_tex, _counts, _lists, _pick, _blobs, _groups, _sliced, _stats,
 			_pipe_slice, _pipe_raster, _shader_slice, _shader_raster]:
 		if rid.is_valid():
 			rd.free_rid(rid)

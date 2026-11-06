@@ -19,6 +19,7 @@ import torch
 from stsplat import io as SIO
 from stsplat import model as M
 from stsplat import render as R
+R.set_backend("auto")
 
 
 def main():
@@ -38,7 +39,8 @@ def main():
     for k, i in enumerate(range(0, n, a.every)):
         t = float(fr.times[i])
         with torch.no_grad():
-            img, _ = R.render(M.slice_at(d["rows"], d["bounds"], t, period=d["period"]), fr.width, h, max_window=1024)
+            img, _ = R.render(M.slice_at(d["rows"], d["bounds"], t, period=d["period"],
+                                          parent=d["parent"], groups=d["groups"]), fr.width, h, max_window=1024)
         tgt = fr.get(i)
         mse = float(((img - tgt) ** 2).mean())
         dark = tgt.mean(-1) < 0.15

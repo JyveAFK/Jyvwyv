@@ -6,12 +6,13 @@ extends Control
 ## Keys (handled by the player): D toggle, M cycle view, O outlines, Esc deselect.
 ## Click a pixel of the image to select the blob that dominates it.
 
-const VIEW_NAMES := ["Image", "Coverage", "Dominant blob", "Life stage"]
+const VIEW_NAMES := ["Image", "Coverage", "Dominant blob", "Life stage", "Groups"]
 const VIEW_HELP := [
 	"Normal image.",
 	"Total blob weight per pixel (log scale).\nBlack/blue = barely covered: one faint blob decides the colour there (stragglers live here). Yellow/white = many blobs.",
 	"Each pixel coloured by the blob with the most weight there, shaded by brightness.",
 	"Green = fading in, white = at its peak, red = fading out.",
+	"Each pixel coloured by the group track of its dominant blob. Grey = blobs moving on their own.",
 ]
 const RING_SIGMAS := [1.0, 2.0, 3.0]
 const TIMELINE_BINS := 600
@@ -20,7 +21,7 @@ var player: Node                 ## the JyvwPlayer that owns this overlay
 var mode := 0
 var outlines := true
 var ring_sigma_index := 0
-var ring_colour := 0             ## 0 white, 1 blob colour, 2 unique per blob
+var ring_colour := 0             ## 0 white, 1 blob colour, 2 unique per blob, 3 group
 var centres := false
 var arrows := false
 var trail := true
@@ -32,6 +33,7 @@ var _hist := PackedInt32Array()
 var _hist_max := 1
 var _time := 0.0
 var _sel_fields := PackedFloat32Array()
+var _sel_parent := -1
 
 var _view_opt: OptionButton
 var _outline_chk: CheckBox
@@ -77,7 +79,7 @@ func _ready() -> void:
 	_sigma_opt.item_selected.connect(func(i): ring_sigma_index = i)
 	row.add_child(_sigma_opt)
 	_colour_opt = OptionButton.new()
-	for s in ["White", "Blob colour", "Unique"]:
+	for s in ["White", "Blob colour", "Unique", "Group"]:
 		_colour_opt.add_item(s)
 	_colour_opt.item_selected.connect(func(i): ring_colour = i)
 	row.add_child(_colour_opt)
@@ -175,6 +177,7 @@ func select(id: int) -> void:
 		return
 	selected = id
 	_sel_fields = _file.get_blob_fields(id)
+	_sel_parent = _file.get_parent(id)
 	queue_redraw()
 
 
@@ -193,6 +196,8 @@ func params() -> Dictionary:
 			flags |= JyvwRenderer.FLAG_RING_BLOB_COLOUR
 		elif ring_colour == 2:
 			flags |= JyvwRenderer.FLAG_RING_ID_COLOUR
+		elif ring_colour == 3:
+			flags |= JyvwRenderer.FLAG_RING_GROUP_COLOUR
 	if centres:
 		flags |= JyvwRenderer.FLAG_CENTRES
 	if arrows:
@@ -223,7 +228,8 @@ func _describe(render_size: Vector2i) -> String:
 	var stage: float = b.life_stage
 	var stage_txt := "fading in" if stage < -1.0 else ("fading out" if stage > 1.0 else "near peak")
 	var lines := PackedStringArray()
-	lines.append("Blob #%d" % selected)
+	lines.append("Blob #%d%s" % [selected, ("   follows group #%d (values below are relative to it)" % b.parent)
+		if b.parent >= 0 else "   moves on its own"])
 	if _file.loop:
 		var rng := _file.blob_visible_range(_sel_fields)
 		lines.append("visible %.3f - %.3f s (wraps around the loop), peak %.3f s, life sigma %.3f s" % [
@@ -262,7 +268,7 @@ func _draw() -> void:
 	var steps := 96
 	for i in steps + 1:
 		var t := lerpf(rng.x, rng.y, i / float(steps))
-		pts.append(to_screen.call(_file.blob_position(_sel_fields, t)))
+		pts.append(to_screen.call(_file.blob_position(_sel_fields, t, _sel_parent)))
 	var cols := PackedColorArray()
 	for i in pts.size():
 		var t := lerpf(rng.x, rng.y, i / float(steps))
@@ -272,7 +278,7 @@ func _draw() -> void:
 	draw_circle(pts[0], 4.0, Color(0.2, 0.9, 0.2))           # birth
 	draw_circle(pts[pts.size() - 1], 4.0, Color(1.0, 0.2, 0.2))  # death
 	if _time >= rng.x and _time <= rng.y:
-		draw_circle(to_screen.call(_file.blob_position(_sel_fields, _time)), 5.0, Color(1, 1, 0))
+		draw_circle(to_screen.call(_file.blob_position(_sel_fields, _time, _sel_parent)), 5.0, Color(1, 1, 0))
 
 
 # --- timeline -----------------------------------------------------------------

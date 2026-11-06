@@ -19,6 +19,7 @@ from PIL import Image
 
 from stsplat import model as M
 from stsplat import render as R
+R.set_backend("auto")
 from stsplat import io as SIO
 
 
@@ -30,6 +31,8 @@ class Player:
     def __init__(self, path, device):
         d = SIO.load_jyvw(path)
         self.rows = d["rows"].to(device)
+        self.parent = d["parent"].to(device)
+        self.groups = d["groups"].to(device)
         self.bounds = d["bounds"].to(device)
         self.aspect = d["aspect"]
         self.duration = d["duration"]
@@ -52,12 +55,11 @@ class Player:
         height = height or max(1, round(width * self.aspect))
         # cull by the hard visibility window first (the file is sorted by t_start)
         if self.period > 0:
-            rows, bounds = self.rows, self.bounds
-            live = torch.ones(rows.shape[0], dtype=torch.bool)
+            live = torch.ones(self.rows.shape[0], dtype=torch.bool, device=self.rows.device)
         else:
             live = (self.bounds[:, 0] <= t) & (self.bounds[:, 1] >= t)
-            rows, bounds = self.rows[live], self.bounds[live]
-        sl = M.slice_at(rows, bounds, t, period=self.period)
+        sl = M.slice_at(self.rows[live], self.bounds[live], t, period=self.period,
+                        parent=self.parent[live], groups=self.groups)
         img, _ = R.render(sl, width, height, max_window=1024)
         return (img.clamp(0, 1).cpu().numpy() * 255 + 0.5).astype(np.uint8), int(live.sum())
 

@@ -19,9 +19,10 @@ layout(push_constant, std430) uniform Params {
 	uint tiles_x;
 	uint cap;
 	vec4 background;   // shown where no blob has any weight
-	uint mode;         // 0 image, 1 coverage, 2 dominant blob, 3 life stage
+	uint mode;         // 0 image, 1 coverage, 2 dominant blob, 3 life stage, 4 groups
 	uint flags;        // 1 outlines, 2 centres, 4 arrows, 8 write pick buffer,
-	                   // 16 outline in blob colour, 32 outline in unique colour
+	                   // 16 outline in blob colour, 32 outline in unique colour,
+	                   // 64 outline in group colour
 	uint selected;     // highlighted blob id (0xFFFFFFFF = none)
 	float ring_k;      // outline radius in sigmas
 	float arrow_secs;  // motion arrow length in seconds
@@ -61,6 +62,11 @@ vec3 heat(float x) {
 	return mix(c3, c4, (x - 0.75) / 0.25);
 }
 
+// colour of a group track; blobs without a group are grey
+vec3 group_colour(float parent) {
+	return parent < 0.0 ? vec3(0.45) : id_colour(uint(parent) * 7919u + 17u);
+}
+
 // fading in (before peak) = green, peak = white, fading out = red
 vec3 life_colour(float x) {
 	float k = clamp(abs(x) / 3.0, 0.0, 1.0);
@@ -80,6 +86,7 @@ void main() {
 	vec3 life_acc = vec3(0.0);
 	float best_g = 0.0;
 	uint best_id = NONE;
+	float best_group = -1.0;
 	float ring_a = 0.0;
 	vec3 ring_c = vec3(1.0);
 	float sel_a = 0.0;
@@ -110,6 +117,7 @@ void main() {
 					if (g > best_g) {
 						best_g = g;
 						best_id = floatBitsToUint(b.w);
+						best_group = sh2[k].w;
 					}
 				}
 			}
@@ -128,7 +136,8 @@ void main() {
 					float ra = clamp(1.0 - px, 0.0, 1.0) * vis;
 					if (ra > ring_a) {
 						ring_a = ra;
-						ring_c = (pc.flags & 32u) != 0u ? id_colour(id)
+						ring_c = (pc.flags & 64u) != 0u ? group_colour(sh2[k].w)
+						       : (pc.flags & 32u) != 0u ? id_colour(id)
 						       : (pc.flags & 16u) != 0u ? sh2[k].rgb : vec3(1.0);
 					}
 				}
@@ -158,6 +167,9 @@ void main() {
 	} else if (pc.mode == 2u) {
 		float lum = dot(img, vec3(0.299, 0.587, 0.114));
 		rgb = best_id == NONE ? pc.background.rgb : id_colour(best_id) * (0.35 + 0.65 * lum);
+	} else if (pc.mode == 4u) {
+		float lum = dot(img, vec3(0.299, 0.587, 0.114));
+		rgb = best_id == NONE ? pc.background.rgb : group_colour(best_group) * (0.35 + 0.65 * lum);
 	} else if (pc.mode == 3u) {
 		float lum = dot(img, vec3(0.299, 0.587, 0.114));
 		rgb = mix(pc.background.rgb, life_acc / (acc.a + 1e-6), cover) * (0.3 + 0.7 * lum);
