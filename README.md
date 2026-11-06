@@ -491,6 +491,4 @@ header, then a compressed block storing each value as its own column (start
 times as exact 0.1 ms steps, each relative to the previous blob), the group each
 blob follows, and the group tracks.
 
-Version 2 `.jyvw` files and legacy `.stsp` files from earlier versions still load
-in every tool and in the Godot player. Re-encode them to get the later fixes; `shrink.py old.stsp
-new.jyvw` only converts the format.
+AI Disclosure : Tool created with assistance from Claude.
