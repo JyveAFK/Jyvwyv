@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root { color-scheme: light; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body { margin: 0; font: 14px system-ui, sans-serif; }
+[hidden] { display: none !important; }
+</style>
+<title>JyveWyve Web Player</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,750&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a screening-room stage (the video, resolution independent) beside a
+   narrow instrument panel; panel drops under the stage on phones. */
+:root {
+  --bg: #eceef2;          /* cool paper grey */
+  --panel: #f8f9fb;
+  --line: #d3d7e0;
+  --fg: #1b1e26;
+  --muted: #5d6474;
+  --accent: #3446c9;      /* cobalt: playhead, slider fills, focus */
+  --accent-soft: #dfe3fb;
+  --stage: #16181d;       /* the screen surround is always dark */
+  --stage-line: #2a2e37;
+  --warn: #a4311f;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111318; --panel: #181b21; --line: #2b303a; --fg: #e6e8ee; --muted: #9aa2b3;
+    --accent: #8f9dff; --accent-soft: #262c4d; --stage: #0b0c0f; --stage-line: #22252c; --warn: #ff8a73;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111318; --panel: #181b21; --line: #2b303a; --fg: #e6e8ee; --muted: #9aa2b3;
+  --accent: #8f9dff; --accent-soft: #262c4d; --stage: #0b0c0f; --stage-line: #22252c; --warn: #ff8a73;
+  color-scheme: dark;
+}
+
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 400 14px/1.5 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 16px;
+  box-sizing: border-box;
+}
+* { box-sizing: border-box; }
+
+.app { display: grid; grid-template-rows: auto 1fr; gap: 12px; height: 100%; max-width: 1500px; margin: 0 auto; }
+header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+h1 { font: 750 22px/1.1 var(--font-display); letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.tagline { color: var(--muted); margin: 0; }
+
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; min-height: 0; }
+
+/* ---- stage ---- */
+.stage {
+  position: relative; min-width: 0; min-height: 320px;
+  background: var(--stage); border-radius: 10px; border: 1px solid var(--stage-line);
+  overflow: auto; display: flex;
+}
+.stage-inner { margin: auto; padding: 18px; }
+canvas#view { display: block; image-rendering: auto; box-shadow: 0 0 0 1px #ffffff14; }
+.stage.dragging { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.overlay {
+  position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+  color: #c9cdd6; font: 500 13px var(--font-mono); text-align: center; padding: 24px;
+}
+.overlay.error { color: #ff9b87; }
+
+/* ---- panel ---- */
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; min-width: 0;
+}
+.group { display: flex; flex-direction: column; gap: 8px; }
+.label {
+  font: 600 11px/1 var(--font-body); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+}
+.label output { font: 500 12px var(--font-mono); letter-spacing: 0; text-transform: none; color: var(--fg); }
+
+select, button, .file-btn {
+  font: 500 13px var(--font-body); color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; min-height: 34px;
+}
+select { width: 100%; }
+button, .file-btn { cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+button:hover, .file-btn:hover, select:hover { border-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.file-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.file-row small { color: var(--muted); }
+input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+.transport { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; }
+#play { width: 40px; height: 34px; padding: 0; }
+#play svg { width: 14px; height: 14px; fill: currentColor; }
+.time { font: 500 12px var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.time b { color: var(--fg); font-weight: 500; }
+
+input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
+.slider-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.slider-row button { min-height: 28px; padding: 3px 8px; font: 500 12px var(--font-mono); }
+.ticks { display: flex; justify-content: space-between; font: 400 10px var(--font-mono); color: var(--muted); margin-top: -4px; }
+
+.checks { display: flex; flex-direction: column; gap: 6px; }
+.url-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin: 0; }
+.url-row input { min-width: 0; font: 400 12px var(--font-mono); color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 8px; }
+.inline-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.inline-check input { accent-color: var(--accent); margin: 0; }
+.scrub-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.bufbar { position: relative; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.bufbar .buf { position: absolute; top: 0; bottom: 0; border-right: 1px solid var(--panel); }
+.bufbar .buf.ready { background: var(--accent); opacity: 0.55; }
+.bufbar .buf.loading { background: var(--accent); opacity: 0.25; }
+.bufbar .buf.error { background: var(--warn); }
+.checks label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.checks input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+dl.info { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; font-size: 13px; }
+dl.info dt { color: var(--muted); }
+dl.info dd { margin: 0; text-align: right; font: 500 12px var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.note { color: var(--muted); font-size: 12px; margin: 0; }
+.status { font-size: 12px; color: var(--muted); min-height: 1.5em; margin: 0; }
+.status.error { color: var(--warn); }
+
+@media (max-width: 820px) {
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .stage { min-height: 260px; max-height: 70vh; }
+  .app { height: auto; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Jyve<span>Wyve</span> Web Player</h1>
+    <p class="tagline">Plays <code>.jyvw</code> blob video in the browser at any size and speed.</p>
+  </header>
+
+  <div class="main">
+    <div class="stage" id="stage">
+      <div class="stage-inner"><canvas id="view" width="320" height="180" aria-label="Video"></canvas></div>
+      <div class="overlay" id="overlay">Loading…</div>
+    </div>
+
+    <aside class="panel">
+      <div class="group">
+        <div class="label"><label for="clip">Clip</label></div>
+        <select id="clip">
+          <option value="samples/test_clip.jyvw.txt">Bouncing balls · 6 s</option>
+          <option value="samples/pan_clip.jyvw.txt">Camera pan, grouped motion · 4 s</option>
+          <option value="samples/loop_clip.jyvw.txt">Drifting shapes · 2 s loop</option>
+          <option value="samples/slice_still.jyvw.txt">Still frame · 1920×1080 source</option>
+          <option value="samples/flash_test.jyvw.txt">Flashes drawn as lighting · 14 s</option>
+          <option value="stream:samples/stream_balls/manifest.json">Streamed: bouncing balls, 5 parts</option>
+          <option value="stream:samples/stream_scenes/manifest.json">Streamed: three scenes, a part each</option>
+          <option value="" id="own-option" hidden>Your file</option>
+        </select>
+        <div class="file-row">
+          <label class="file-btn" for="file">Open .jyvw…</label>
+          <input type="file" id="file" accept=".jyvw">
+          <small>or drop a file on the video</small>
+        </div>
+        <div class="file-row">
+          <label class="file-btn" for="folder">Open stream folder…</label>
+          <input type="file" id="folder" webkitdirectory multiple>
+          <small>a folder made by stream.py</small>
+        </div>
+        <form class="url-row" id="stream-form">
+          <input type="url" id="stream-url" placeholder="https://…/manifest.json" aria-label="Stream manifest URL">
+          <button type="submit">Stream</button>
+        </form>
+        <label class="inline-check"><input type="checkbox" id="slow-net"> Simulate a slow connection (about 1 s per part)</label>
+        <p class="status" id="status" role="status"></p>
+      </div>
+
+      <div class="group">
+        <div class="label"><span>Playback</span></div>
+        <div class="transport">
+          <button id="play" aria-label="Pause" title="Play / pause (space)">
+            <svg id="icon-pause" viewBox="0 0 14 14"><rect x="2" y="1" width="3.5" height="12" rx="1"/><rect x="8.5" y="1" width="3.5" height="12" rx="1"/></svg>
+            <svg id="icon-play" viewBox="0 0 14 14" hidden><path d="M3 1.2v11.6a.6.6 0 0 0 .9.5l9.2-5.8a.6.6 0 0 0 0-1L3.9.7a.6.6 0 0 0-.9.5z"/></svg>
+          </button>
+          <div class="scrub-wrap">
+            <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="Position">
+            <div class="bufbar" id="bufbar" hidden></div>
+          </div>
+        </div>
+        <div class="time"><b id="t-now">0.000 s</b> / <span id="t-len">0.00 s</span></div>
+        <div class="time" id="t-frame">source frame 0.00</div>
+      </div>
+
+      <div class="group">
+        <div class="label"><label for="speed">Speed</label><output id="speed-out">1.00×</output></div>
+        <div class="slider-row">
+          <input type="range" id="speed" min="0" max="1000" step="1">
+          <button id="speed-reset" title="Normal speed">1×</button>
+        </div>
+        <div class="ticks"><span>0.05×</span><span>1×</span><span>4×</span></div>
+      </div>
+
+      <div class="group">
+        <div class="label"><label for="scale">Scale</label><output id="scale-out">100%</output></div>
+        <div class="slider-row">
+          <input type="range" id="scale" min="0" max="1000" step="1">
+          <button id="scale-reset" title="Fit to the window">Fit</button>
+        </div>
+        <div class="ticks"><span>10%</span><span>fit</span><span>400%</span></div>
+        <p class="note">Every size is drawn fresh from the blobs, so it stays sharp at any scale.</p>
+      </div>
+
+      <div class="group">
+        <div class="label"><label for="view-mode">Debug view</label></div>
+        <select id="view-mode">
+          <option value="0">Image</option>
+          <option value="1">Coverage (total blob weight)</option>
+          <option value="2">Dominant blob</option>
+          <option value="3">Life stage</option>
+          <option value="4">Motion groups</option>
+        </select>
+        <p class="note" id="view-note">The decoded picture.</p>
+        <div class="checks">
+          <label><input type="checkbox" id="opt-rings"> Outlines (2σ)</label>
+          <label><input type="checkbox" id="opt-dots"> Centres</label>
+          <label><input type="checkbox" id="opt-arrows"> Motion arrows (0.25 s of travel)</label>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="label"><span>File</span></div>
+        <dl class="info" id="info"></dl>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js"></script>
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+// ---------------------------------------------------------------- file format
+// .jyvw v3: "JYVW" + 48-byte header, then one compressed block of columns
+// (struct of arrays). See jyvenc/io.py save()/_load_v3().
+const TICKS = 10000;
+const HEADER = 52;
+
+function halfToFloat(h) {
+  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+  if (e === 0) return s * f * 5.960464477539063e-8;          // 2^-24
+  if (e === 31) return f ? NaN : s * Infinity;
+  return s * (1 + f / 1024) * Math.pow(2, e - 15);
+}
+
+async function decompress(bytes, method, rawSize) {
+  if (method === 0) return bytes;
+  if (method === 1) {
+    if (!window.fzstd) throw new Error("The zstd decoder didn't load; check your connection and reload.");
+    return fzstd.decompress(bytes, new Uint8Array(rawSize));
+  }
+  if (method === 2) {
+    const ds = new DecompressionStream("deflate");
+    const out = await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer();
+    return new Uint8Array(out);
+  }
+  throw new Error(`Unknown compression method ${method}.`);
+}
+
+async function parseJyvw(buf) {
+  const u8 = new Uint8Array(buf);
+  const magic = String.fromCharCode(...u8.slice(0, 4));
+  if (magic !== "JYVW") throw new Error("This isn't a .jyvw file (wrong signature).");
+  const hv = new DataView(buf);
+  const ver = hv.getUint32(4, true);
+  if (ver !== 3) throw new Error(`This is a version ${ver} .jyvw file; the web player reads version 3. Re-save it with the current encoder (python shrink.py in.jyvw out.jyvw --keep 1).`);
+  const h = {
+    flags: hv.getUint32(8, true), srcW: hv.getUint32(12, true), srcH: hv.getUint32(16, true),
+    aspect: hv.getFloat32(20, true), fps: hv.getFloat32(24, true), duration: hv.getFloat32(28, true),
+    n: hv.getUint32(32, true), groups: hv.getUint32(36, true), method: hv.getUint32(40, true),
+    stored: hv.getUint32(44, true), rawSize: hv.getUint32(48, true),
+  };
+  h.compact = !!(h.flags & 1);
+  h.loop = !!(h.flags & 2);
+  const raw = await decompress(u8.subarray(HEADER, HEADER + h.stored), h.method, h.rawSize);
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const n = h.n, G = h.groups;
+  let pos = 0;
+  const i32 = (count) => { const a = new Int32Array(count); for (let i = 0; i < count; i++) a[i] = dv.getInt32(pos + 4 * i, true); pos += 4 * count; return a; };
+  const f32 = (count) => { const a = new Float32Array(count); for (let i = 0; i < count; i++) a[i] = dv.getFloat32(pos + 4 * i, true); pos += 4 * count; return a; };
+  const f16col = () => {
+    if (!h.compact) return f32(n);
+    const pad = n + (n & 1), a = new Float32Array(n);
+    for (let i = 0; i < n; i++) a[i] = halfToFloat(dv.getUint16(pos + 2 * i, true));
+    pos += 2 * pad; return a;
+  };
+  const deltas = i32(n);
+  const tStart = new Float64Array(n);
+  let acc = 0;
+  for (let i = 0; i < n; i++) { acc += deltas[i]; tStart[i] = acc / TICKS; }
+  const tEndRel = f32(n), t0Rel = f32(n), fade = f32(n), muX = f32(n), muY = f32(n);
+  // 16-bit columns, in file-record order 3, 6..22
+  const names = ["logSt", "velX", "velY", "accX", "accY", "logSX", "logSY", "srX", "srY",
+                 "theta", "ang", "colR", "colG", "colB", "crR", "crG", "crB", "weight"];
+  const c = {};
+  const grey = !!(h.flags & 8);       // greyscale files store only the red colour and colour rate
+  for (const k of names) {
+    if (grey && (k === "colG" || k === "colB" || k === "crG" || k === "crB")) continue;
+    c[k] = f16col();
+  }
+  if (grey) { c.colG = c.colB = c.colR; c.crG = c.crB = c.crR; }
+  const parent = i32(n);
+  const gcols = [];
+  for (let k = 0; k < 9; k++) gcols.push(f32(G));
+  // light track (flag bit 2): flashes drawn as lighting over the blobs (jyvenc/jyvenc/light.py)
+  let light = null;
+  if (h.flags & 4) {
+    const K = dv.getUint32(pos, true), gw = dv.getUint32(pos + 4, true), gh = dv.getUint32(pos + 8, true);
+    pos += 12;
+    const times = new Float64Array(K);
+    for (let k = 0; k < K; k++) times[k] = dv.getFloat64(pos + 8 * k, true);
+    pos += 8 * K;
+    const vals = f32(K * gw * gh * 6);
+    light = { gw, gh, times, vals };
+  }
+  return { h, n, G, tStart, tEndRel, t0Rel, fade, muX, muY, c, parent, gcols, light, bytes: buf.byteLength };
+}
+
+// The light grid at time t (gh * gw * 6 values: gain rgb, offset rgb per node,
+// row by row), or null when nothing applies. Linear between keys.
+function lightAt(light, t) {
+  if (!light || !light.times.length) return null;
+  const ts = light.times, K = ts.length, m = light.gw * light.gh * 6;
+  if (t < ts[0] || t > ts[K - 1]) return null;
+  let k = 0;
+  while (k + 1 < K && ts[k + 1] <= t) k++;
+  if (k + 1 >= K || ts[k + 1] <= ts[k]) return { gw: light.gw, gh: light.gh, v: light.vals.subarray(k * m, (k + 1) * m) };
+  const w = (t - ts[k]) / (ts[k + 1] - ts[k]), v = new Float32Array(m);
+  for (let i = 0; i < m; i++) v[i] = light.vals[k * m + i] * (1 - w) + light.vals[(k + 1) * m + i] * w;
+  return { gw: light.gw, gh: light.gh, v };
+}
+
+// ---------------------------------------------------------------- renderer
+const canvas = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.autoClear = false;
+const gl = renderer.getContext();
+const floatBlend = !!gl.getExtension("EXT_float_blend");
+gl.getExtension("EXT_color_buffer_float");
+const maxSide = Math.min(8192, gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
+
+// Every pass draws each blob as one instanced quad. The common GLSL below slices
+// a blob at uTime (same maths as jyvenc/model.py slice_at). The image pass adds
+// (rgb * w, w) into a float buffer and a resolve pass divides by total weight;
+// the debug passes reuse the same slice.
+const colourGLSL = /* glsl */`
+vec3 idColour(uint id) {
+  uint h = id * 2654435761u;
+  h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+  return vec3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0 * 0.75 + 0.25;
+}
+vec3 groupColour(float parent) { return parent < 0.0 ? vec3(0.45) : idColour(uint(parent) * 7919u + 17u); }
+vec3 lifeColour(float x) {   // fading in = green, peak = white, fading out = red
+  float k = clamp(abs(x) / 3.0, 0.0, 1.0);
+  return x < 0.0 ? mix(vec3(1.0), vec3(0.1, 0.9, 0.2), k) : mix(vec3(1.0), vec3(1.0, 0.15, 0.1), k);
+}
+vec3 heat(float x) {         // black -> blue -> green -> yellow -> white
+  x = clamp(x, 0.0, 1.0);
+  vec3 c0 = vec3(0.02, 0.02, 0.08), c1 = vec3(0.10, 0.25, 0.95), c2 = vec3(0.10, 0.80, 0.30),
+       c3 = vec3(1.00, 0.85, 0.10), c4 = vec3(1.0);
+  if (x < 0.25) return mix(c0, c1, x / 0.25);
+  if (x < 0.50) return mix(c1, c2, (x - 0.25) / 0.25);
+  if (x < 0.75) return mix(c2, c3, (x - 0.50) / 0.25);
+  return mix(c3, c4, (x - 0.75) / 0.25);
+}
+`;
+const sliceGLSL = /* glsl */`
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+in vec2 corner;
+in vec4 a0; // t0, logSt, mu.x, mu.y
+in vec4 a1; // vel.x, vel.y, acc.x, acc.y
+in vec4 a2; // logS.x, logS.y, sizeRate.x, sizeRate.y
+in vec4 a3; // theta, spin, weight, parent (-1 = none)
+in vec4 a4; // colour logits rgb
+in vec4 a5; // colour-logit rates rgb
+in vec4 a6; // t_start, t_end, fade
+uniform float uTime, uPeriod, uAspect, uWidthPx;
+uniform int uGroups;
+uniform sampler2D uGroupTex;
+const float GROW = 1.3862944;   // ln 4
+float wrapdt(float d) { return d - uPeriod * floor(d / uPeriod + 0.5); }
+struct Blob { vec2 mean; vec2 scale; float theta; vec3 col; float w; float life; vec2 vel; float parent; };
+bool sliceBlob(out Blob b) {
+  float t = uTime;
+  float dt = t - a0.x;
+  float inside = 1.0, ramp = 1.0;
+  if (uPeriod > 0.0) {
+    dt = wrapdt(dt);
+  } else {
+    inside = (t >= a6.x && t <= a6.y) ? 1.0 : 0.0;
+    if (a6.z > 0.0) { float x = clamp((t - a6.x) / max(a6.z, 1e-6), 0.0, 1.0); ramp = x * x * (3.0 - 2.0 * x); }
+  }
+  float st = exp(a0.y);
+  float z = dt / st;
+  b.w = a3.z * exp(-0.5 * z * z) * inside * ramp;
+  b.life = z;
+  b.parent = a3.w;
+  if (b.w < 1e-4) return false;
+  b.mean = a0.zw + a1.xy * dt + 0.5 * a1.zw * dt * dt;
+  b.vel = a1.xy + a1.zw * dt;
+  b.scale = exp(a2.xy + clamp(a2.zw * dt, vec2(-GROW), vec2(GROW)));
+  b.theta = a3.x + a3.y * dt;
+  b.col = 1.0 / (1.0 + exp(-(a4.xyz + a5.xyz * dt)));
+  if (a3.w > -0.5 && uGroups > 0) {
+    int gi = int(a3.w + 0.5);
+    vec4 g0 = texelFetch(uGroupTex, ivec2(0, gi), 0);   // t0, pos.x, pos.y, vel.x
+    vec4 g1 = texelFetch(uGroupTex, ivec2(1, gi), 0);   // vel.y, acc.x, acc.y, rot
+    vec4 g2 = texelFetch(uGroupTex, ivec2(2, gi), 0);   // spin
+    float dg = t - g0.x;
+    if (uPeriod > 0.0) dg = wrapdt(dg);
+    vec2 gpos = g0.yz + vec2(g0.w, g1.x) * dg + 0.5 * g1.yz * dg * dg;
+    vec2 gvel = vec2(g0.w, g1.x) + g1.yz * dg;
+    float ga = g1.w + g2.x * dg;
+    float c = cos(ga), s = sin(ga);
+    b.mean = gpos + vec2(c * b.mean.x - s * b.mean.y, s * b.mean.x + c * b.mean.y);
+    b.vel = gvel + vec2(c * b.vel.x - s * b.vel.y, s * b.vel.x + c * b.vel.y);
+    b.theta += ga;
+  }
+  return true;
+}
+vec4 toClip(vec2 p) { return vec4(p.x * 2.0 - 1.0, 1.0 - 2.0 * p.y / uAspect, 0.0, 1.0); }
+vec2 rot(vec2 v, float a) { float c = cos(a), s = sin(a); return vec2(c * v.x - s * v.y, s * v.x + c * v.y); }
+const vec4 OFF = vec4(2.0, 2.0, 2.0, 1.0);   // outside the view: culled
+`;
+
+
+// image / life / dominant passes: quad over the 3-sigma ellipse
+const blobVS = sliceGLSL + colourGLSL + /* glsl */`
+uniform int uPass;          // 0 image, 1 life stage, 2 dominant blob, 3 dominant group
+out vec2 vLocal;
+out vec3 vColor;
+out float vWeight;
+void main() {
+  Blob b;
+  if (!sliceBlob(b)) { gl_Position = OFF; vLocal = vec2(0.0); vColor = vec3(0.0); vWeight = 0.0; return; }
+  gl_Position = toClip(b.mean + rot(corner * b.scale, b.theta));
+  vLocal = corner; vWeight = b.w;
+  vColor = uPass == 1 ? lifeColour(b.life)
+         : uPass == 2 ? idColour(uint(gl_InstanceID))
+         : uPass == 3 ? groupColour(b.parent) : b.col;
+}`;
+const blobFS = /* glsl */`
+precision highp float;
+precision highp int;
+uniform int uPass;
+in vec2 vLocal;
+in vec3 vColor;
+in float vWeight;
+out vec4 outColor;
+void main() {
+  float q = dot(vLocal, vLocal);
+  if (q >= 9.0) discard;
+  float g = vWeight * exp(-0.5 * q);
+  if (uPass >= 2) {          // keep the blob with the biggest weight here (depth test)
+    gl_FragDepth = 1.0 - clamp(g, 0.0, 1.0) * 0.999;
+    outColor = vec4(vColor, 1.0);
+  } else {
+    gl_FragDepth = gl_FragCoord.z;
+    outColor = vec4(vColor * g, g);
+  }
+}`;
+
+// outlines and centres: quad big enough for the 2-sigma ring and a 2 px dot
+const markVS = sliceGLSL + colourGLSL + /* glsl */`
+uniform int uRingColour;    // 0 white, 1 blob id colour, 2 group colour
+out vec2 vLocal;
+out vec2 vOffPx;
+out vec3 vRing;
+out float vVis;
+void main() {
+  Blob b;
+  if (!sliceBlob(b)) { gl_Position = OFF; vLocal = vec2(0.0); vOffPx = vec2(0.0); vRing = vec3(0.0); vVis = 0.0; return; }
+  vec2 e = max(vec2(1.0), 3.5 / (b.scale * uWidthPx) / 3.0);   // at least 3.5 px out
+  vec2 local = corner * e;                                     // in sigmas, up to 3 * e
+  vec2 off = rot(local * b.scale, b.theta);
+  gl_Position = toClip(b.mean + off);
+  vLocal = local; vOffPx = off * uWidthPx;
+  vRing = uRingColour == 1 ? idColour(uint(gl_InstanceID)) : uRingColour == 2 ? groupColour(b.parent) : vec3(1.0);
+  vVis = clamp(b.w * 3.0, 0.2, 1.0);       // overlays fade with the blob's weight
+}`;
+const markFS = /* glsl */`
+precision highp float;
+precision highp int;
+uniform bool uRings, uDots;
+in vec2 vLocal;
+in vec2 vOffPx;
+in vec3 vRing;
+in float vVis;
+out vec4 outColor;
+void main() {
+  float ra = 0.0, da = 0.0;
+  if (uRings) {
+    float r = length(vLocal);
+    float px = abs(r - 2.0) / max(fwidth(r), 1e-6);     // pixels from the 2-sigma ellipse
+    ra = clamp(1.0 - px, 0.0, 1.0) * vVis * 0.85;
+  }
+  if (uDots) da = clamp(2.2 - length(vOffPx), 0.0, 1.0) * vVis;
+  float a = max(ra, da);
+  if (a <= 0.003) discard;
+  outColor = vec4(da >= ra ? vec3(1.0) : vRing, a);
+}`;
+
+// motion arrows: a 2.5 px wide bar from the centre along 0.25 s of travel, with a head
+const arrowVS = sliceGLSL + /* glsl */`
+uniform float uArrowSecs;
+out vec2 vAlong;   // x: 0..1 along the arrow, y: pixels across
+out float vLenPx;
+out float vVis;
+void main() {
+  Blob b;
+  if (!sliceBlob(b)) { gl_Position = OFF; vAlong = vec2(0.0); vLenPx = 0.0; vVis = 0.0; return; }
+  vec2 v = b.vel * uArrowSecs;
+  float lenPx = length(v) * uWidthPx;
+  if (lenPx < 2.0) { gl_Position = OFF; vAlong = vec2(0.0); vLenPx = 0.0; vVis = 0.0; return; }
+  vec2 dir = v / length(v);
+  vec2 perp = vec2(-dir.y, dir.x);
+  float u = (corner.x + 3.0) / 6.0;            // 0 at the centre, 1 at the tip
+  float side = corner.y / 3.0;                 // -1 / +1
+  float halfW = 4.5 / uWidthPx;                // room for the head
+  gl_Position = toClip(b.mean + v * u + perp * side * halfW);
+  vAlong = vec2(u, side * 4.5); vLenPx = lenPx; vVis = clamp(b.w * 3.0, 0.2, 1.0);
+}`;
+const arrowFS = /* glsl */`
+precision highp float;
+precision highp int;
+in vec2 vAlong;
+in float vLenPx;
+in float vVis;
+out vec4 outColor;
+void main() {
+  float fromTip = (1.0 - vAlong.x) * vLenPx;   // pixels back from the tip
+  float headLen = min(6.0, vLenPx * 0.45);
+  float w = fromTip < headLen ? 0.75 + 3.75 * fromTip / headLen : 1.25;   // half-width in px
+  float a = clamp(w + 0.5 - abs(vAlong.y), 0.0, 1.0) * vVis;
+  if (a <= 0.003) discard;
+  outColor = vec4(1.0, 0.8, 0.15, a);
+}`;
+
+const resolveVS = /* glsl */`
+precision highp float;
+in vec3 position;
+void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+const resolveFS = /* glsl */`
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uAcc, uAux, uLight;
+uniform int uMode;          // 0 image, 1 coverage, 2 dominant blob, 3 life stage, 4 groups
+uniform int uLightOn;       // 1: apply the light grid (flashes), image view only
+uniform ivec2 uLightN;      // grid nodes across, down
+out vec4 outColor;
+// uLight: (2 * gw) x gh texels, gains on the left half, offsets on the right
+vec3 lightNode(int x, int y, int part) { return texelFetch(uLight, ivec2(x + part * uLightN.x, y), 0).rgb; }
+vec3 applyLight(vec3 c, vec2 uv) {
+  int gw = uLightN.x, gh = uLightN.y;
+  vec2 f = vec2(gw > 1 ? uv.x * float(gw - 1) : 0.0, gh > 1 ? uv.y * float(gh - 1) : 0.0);
+  ivec2 i0 = clamp(ivec2(floor(f)), ivec2(0), ivec2(max(gw - 2, 0), max(gh - 2, 0)));
+  vec2 w = clamp(f - vec2(i0), 0.0, 1.0);
+  ivec2 i1 = min(i0 + 1, ivec2(gw - 1, gh - 1));
+  vec3 g = mix(mix(lightNode(i0.x, i0.y, 0), lightNode(i1.x, i0.y, 0), w.x),
+               mix(lightNode(i0.x, i1.y, 0), lightNode(i1.x, i1.y, 0), w.x), w.y);
+  vec3 o = mix(mix(lightNode(i0.x, i0.y, 1), lightNode(i1.x, i0.y, 1), w.x),
+               mix(lightNode(i0.x, i1.y, 1), lightNode(i1.x, i1.y, 1), w.x), w.y);
+  return clamp(g * c + o, 0.0, 1.0);
+}
+` + colourGLSL + /* glsl */`
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 a = texelFetch(uAcc, p, 0);
+  float cover = clamp(a.a * 1e4, 0.0, 1.0);
+  vec3 img = a.rgb / (a.a + 1e-6) * cover;   // fades to black where nothing covers
+  vec3 rgb = img;
+  float lum = dot(clamp(img, 0.0, 1.0), vec3(0.299, 0.587, 0.114));
+  if (uMode == 0 && uLightOn == 1) {
+    vec2 sz = vec2(textureSize(uAcc, 0));
+    rgb = applyLight(img, vec2(gl_FragCoord.x / sz.x, 1.0 - gl_FragCoord.y / sz.y));   // grid row 0 is the top
+  }
+  if (uMode == 1) {
+    rgb = heat((log(a.a + 1e-7) / log(10.0) + 4.0) / 5.0);   // 1e-4 .. 10 total weight
+  } else if (uMode == 2 || uMode == 4) {
+    vec4 d = texelFetch(uAux, p, 0);
+    rgb = d.a < 0.5 ? vec3(0.0) : d.rgb * (0.35 + 0.65 * lum);
+  } else if (uMode == 3) {
+    vec4 l = texelFetch(uAux, p, 0);
+    rgb = l.rgb / (a.a + 1e-6) * cover * (0.3 + 0.7 * lum);
+  }
+  outColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+}`;
+
+const camera = new THREE.Camera();
+const emptyGroups = new THREE.DataTexture(new Float32Array(4 * 3), 3, 1, THREE.RGBAFormat, THREE.FloatType);
+emptyGroups.needsUpdate = true;
+const shared = {   // uniforms every blob pass reads
+  uTime: { value: 0 }, uPeriod: { value: 0 }, uAspect: { value: 0.5625 }, uWidthPx: { value: 320 },
+  uGroups: { value: 0 }, uGroupTex: { value: emptyGroups },
+};
+const additive = {
+  transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
+  blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneFactor,
+};
+const over = {      // ordinary alpha blending, for overlays drawn on the finished picture
+  transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
+  blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+  blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+};
+const mat = (vs, fs, extra, opts) => new THREE.RawShaderMaterial({
+  glslVersion: THREE.GLSL3, vertexShader: vs, fragmentShader: fs,
+  uniforms: { ...shared, ...extra }, ...opts,
+});
+// (y is flipped into screen space, which reverses the winding: all passes are double-sided)
+const imageMat = mat(blobVS, blobFS, { uPass: { value: 0 } }, additive);
+const lifeMat = mat(blobVS, blobFS, { uPass: { value: 1 } }, additive);
+const domMat = mat(blobVS, blobFS, { uPass: { value: 2 } },
+  { depthTest: true, depthWrite: true, depthFunc: THREE.LessDepth, side: THREE.DoubleSide, blending: THREE.NoBlending });
+const markMat = mat(markVS, markFS, { uRingColour: { value: 0 }, uRings: { value: false }, uDots: { value: false } }, over);
+const arrowMat = mat(arrowVS, arrowFS, { uArrowSecs: { value: 0.25 } }, over);
+const resolveMat = new THREE.RawShaderMaterial({
+  glslVersion: THREE.GLSL3, vertexShader: resolveVS, fragmentShader: resolveFS,
+  uniforms: { uAcc: { value: null }, uAux: { value: null }, uMode: { value: 0 },
+              uLight: { value: null }, uLightOn: { value: 0 }, uLightN: { value: new THREE.Vector2(1, 1) } },
+  depthTest: false, depthWrite: false,
+});
+const tri = new THREE.BufferGeometry();
+tri.setAttribute("position", new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
+const resolveScene = new THREE.Scene();
+const resolveMesh = new THREE.Mesh(tri, resolveMat);
+resolveMesh.frustumCulled = false;
+resolveScene.add(resolveMesh);
+
+// one scene per pass, all sharing the blob geometry
+const passes = {};
+for (const [k, m] of Object.entries({ image: imageMat, life: lifeMat, dom: domMat, mark: markMat, arrow: arrowMat })) {
+  passes[k] = { scene: new THREE.Scene(), mat: m, mesh: null };
+}
+
+const targets = {};
+function target(name, w, h, kind) {
+  const t = targets[name];
+  if (t && t.width === w && t.height === h) return t;
+  if (t) t.dispose();
+  const float = kind === "float";
+  targets[name] = new THREE.WebGLRenderTarget(w, h, {
+    type: float ? (floatBlend ? THREE.FloatType : THREE.HalfFloatType) : THREE.UnsignedByteType,
+    format: THREE.RGBAFormat, depthBuffer: !float, stencilBuffer: false,
+    minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  });
+  return targets[name];
+}
+
+// ---------------------------------------------------------------- GPU data per clip / part
+// A file (or one part of a stream) becomes an instanced geometry + its group
+// track texture. Drawing a frame takes a list of (gpu data, local time): a plain
+// file is one entry; a stream draws every part that is visible at that moment,
+// all summed into the same picture before the normalising divide.
+const placeholder = new THREE.InstancedBufferGeometry();
+for (const p of Object.values(passes)) {
+  p.mesh = new THREE.Mesh(placeholder, p.mat);
+  p.mesh.frustumCulled = false;
+  p.scene.add(p.mesh);
+}
+
+function makeGPU(clip) {
+  const { n, c } = clip;
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.setAttribute("corner", new THREE.Float32BufferAttribute([-3, -3, 3, -3, -3, 3, 3, 3], 2));
+  geo.setIndex([0, 1, 2, 2, 1, 3]);
+  const A = Array.from({ length: 7 }, () => new Float32Array(4 * Math.max(n, 1)));
+  for (let i = 0; i < n; i++) {
+    const ts = clip.tStart[i], j = 4 * i;
+    A[0].set([ts + clip.t0Rel[i], c.logSt[i], clip.muX[i], clip.muY[i]], j);
+    A[1].set([c.velX[i], c.velY[i], c.accX[i], c.accY[i]], j);
+    A[2].set([c.logSX[i], c.logSY[i], c.srX[i], c.srY[i]], j);
+    A[3].set([c.theta[i], c.ang[i], c.weight[i], clip.parent[i]], j);
+    A[4].set([c.colR[i], c.colG[i], c.colB[i], 0], j);
+    A[5].set([c.crR[i], c.crG[i], c.crB[i], 0], j);
+    A[6].set([ts, ts + clip.tEndRel[i], clip.fade[i], 0], j);
+  }
+  A.forEach((arr, k) => geo.setAttribute("a" + k, new THREE.InstancedBufferAttribute(arr, 4)));
+  geo.instanceCount = n;
+  let groupTex = null;
+  const G = clip.G;
+  if (G > 0) {
+    const g = clip.gcols, data = new Float32Array(12 * G);
+    for (let k = 0; k < G; k++) {
+      data.set([g[0][k], g[1][k], g[2][k], g[3][k], g[4][k], g[5][k], g[6][k], g[7][k], g[8][k], 0, 0, 0], 12 * k);
+    }
+    groupTex = new THREE.DataTexture(data, 3, G, THREE.RGBAFormat, THREE.FloatType);
+    groupTex.needsUpdate = true;
+  }
+  return { geo, groupTex, G, n, period: clip.h.loop ? clip.h.duration : 0, light: clip.light,
+           dispose() { geo.dispose(); if (groupTex) groupTex.dispose(); } };
+}
+
+function useGPU(g, t) {
+  for (const p of Object.values(passes)) p.mesh.geometry = g.geo;
+  shared.uGroupTex.value = g.groupTex || emptyGroups;
+  shared.uGroups.value = g.G;
+  shared.uPeriod.value = g.period;
+  shared.uTime.value = t;
+}
+
+// debug settings (set from the panel)
+const debug = { mode: 0, rings: false, dots: false, arrows: false };
+const MODE = { image: 0, coverage: 1, dominant: 2, life: 3, groups: 4 };
+
+let lightTex = null;
+function setLight(list) {
+  // the first part with a flash at this moment (stream parts carry their own keys)
+  let L = null;
+  for (const it of list) { L = lightAt(it.gpu.light, it.t); if (L) break; }
+  resolveMat.uniforms.uLightOn.value = L ? 1 : 0;
+  if (!L) return;
+  const W = 2 * L.gw, H = L.gh;
+  if (!lightTex || lightTex.image.width !== W || lightTex.image.height !== H) {
+    if (lightTex) lightTex.dispose();
+    lightTex = new THREE.DataTexture(new Float32Array(4 * W * H), W, H, THREE.RGBAFormat, THREE.FloatType);
+  }
+  const d = lightTex.image.data;
+  for (let y = 0; y < L.gh; y++) for (let x = 0; x < L.gw; x++) {
+    const s = (y * L.gw + x) * 6;
+    for (let part = 0; part < 2; part++) {
+      const o = 4 * (y * W + x + part * L.gw);
+      d[o] = L.v[s + 3 * part]; d[o + 1] = L.v[s + 3 * part + 1]; d[o + 2] = L.v[s + 3 * part + 2]; d[o + 3] = 1;
+    }
+  }
+  lightTex.needsUpdate = true;
+  resolveMat.uniforms.uLight.value = lightTex;
+  resolveMat.uniforms.uLightN.value.set(L.gw, L.gh);
+}
+
+function draw(list, aspect) {
+  const w = canvas.width, h = canvas.height;
+  setLight(list);
+  shared.uWidthPx.value = w;
+  shared.uAspect.value = aspect;
+  renderer.setClearColor(0x000000, 0);
+  const acc = target("acc", w, h, "float");
+  renderer.setRenderTarget(acc);
+  renderer.clear(true, false, false);
+  for (const it of list) { useGPU(it.gpu, it.t); renderer.render(passes.image.scene, camera); }
+  resolveMat.uniforms.uAcc.value = acc.texture;
+  resolveMat.uniforms.uMode.value = debug.mode;
+  if (debug.mode === MODE.dominant || debug.mode === MODE.groups) {
+    const dom = target("dom", w, h, "byte");
+    domMat.uniforms.uPass.value = debug.mode === MODE.groups ? 3 : 2;
+    renderer.setRenderTarget(dom);
+    renderer.clear(true, true, false);
+    for (const it of list) { useGPU(it.gpu, it.t); renderer.render(passes.dom.scene, camera); }
+    resolveMat.uniforms.uAux.value = dom.texture;
+  } else if (debug.mode === MODE.life) {
+    const life = target("life", w, h, "float");
+    renderer.setRenderTarget(life);
+    renderer.clear(true, false, false);
+    for (const it of list) { useGPU(it.gpu, it.t); renderer.render(passes.life.scene, camera); }
+    resolveMat.uniforms.uAux.value = life.texture;
+  }
+  renderer.setRenderTarget(null);
+  renderer.render(resolveScene, camera);
+  if (debug.rings || debug.dots) {
+    markMat.uniforms.uRings.value = debug.rings;
+    markMat.uniforms.uDots.value = debug.dots;
+    markMat.uniforms.uRingColour.value = debug.mode === MODE.groups ? 2 : debug.mode === MODE.dominant ? 1 : 0;
+    for (const it of list) { useGPU(it.gpu, it.t); renderer.render(passes.mark.scene, camera); }
+  }
+  if (debug.arrows) for (const it of list) { useGPU(it.gpu, it.t); renderer.render(passes.arrow.scene, camera); }
+}
+
+// ---------------------------------------------------------------- media: a file or a stream
+const b64ToBuffer = (text) => {
+  const bin = atob(text.trim());
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8.buffer;
+};
+
+function sliceTimeOf(h, t) {
+  if (h.duration <= 0) return 0;
+  if (h.loop) return ((t % h.duration) + h.duration) % h.duration;
+  return Math.min(Math.max(t, 0), h.duration - 0.5 / Math.max(h.fps, 1e-6));
+}
+
+function fileMedia(clip, name) {
+  const gpu = makeGPU(clip);
+  return {
+    kind: "file", name, h: clip.h, n: clip.n, G: clip.G, bytes: clip.bytes,
+    active(t) { return [{ gpu, t: sliceTimeOf(clip.h, t) }]; },
+    tick() {}, buffered() { return []; },
+    dispose() { gpu.dispose(); },
+  };
+}
+
+// A stream: manifest.json plus parts (each an ordinary .jyvw). Every blob lives
+// in the part where it starts; a part stays visible until its "reach". To show
+// time t the player needs every part with start <= t <= reach; it fetches those
+// first, then the next parts ahead of the playhead.
+function streamMedia(man, source, name) {
+  if (man.format !== "jyvw-stream") throw new Error("That manifest isn't a JyveWyve stream (format should be jyvw-stream).");
+  const h = { aspect: man.aspect, fps: man.fps, duration: man.duration, loop: !!man.loop,
+              srcW: man.source_size[0], srcH: man.source_size[1] };
+  const half = 0.5 / Math.max(h.fps, 1e-6);
+  const parts = man.parts.map((e, i) => ({ i, e, state: "idle", gpu: null, used: 0 }));
+  let downloaded = 0, loading = 0;
+  const LOOKAHEAD = 6;           // seconds of playback to have ready ahead of the playhead
+  const MAX_LOADS = 2;
+  const self = {
+    kind: "stream", name, h, man, parts, n: man.blobs, G: 0, bytes: man.bytes,
+    get downloaded() { return downloaded; },
+    needed(t) {
+      if (h.loop) return parts;
+      return parts.filter((p) => p.e.start - half - 1e-4 <= t && t <= p.e.reach + 1e-4);
+    },
+    active(t) {
+      const st = sliceTimeOf(h, t);
+      const need = self.needed(st);
+      let ready = true;
+      for (const p of need) { if (p.state !== "ready") { ready = false; self.request(p, true); } p.used = performance.now(); }
+      if (!ready) return null;
+      return need.map((p) => ({ gpu: p.gpu, t: st - p.e.start }));
+    },
+    request(p, urgent = false) {
+      if (p.state !== "idle" && p.state !== "error") return;
+      if (!urgent && loading >= MAX_LOADS) return;
+      p.state = "loading"; loading++;
+      onStreamChange();
+      (async () => {
+        try {
+          if (slowNet) await new Promise((r) => setTimeout(r, 900 + 400 * Math.random()));
+          let buf = await source.get(p.e.file);
+          if (typeof buf === "string") buf = b64ToBuffer(buf);
+          downloaded += buf.byteLength;
+          const clip = await parseJyvw(buf);
+          p.gpu = makeGPU(clip);
+          p.state = "ready";
+        } catch (err) {
+          p.state = "error";
+          setStatus(`Part ${p.i + 1} (${p.e.file}) didn't load: ${err.message || err}`, true);
+        } finally {
+          loading--; dirty = true; onStreamChange();
+        }
+      })();
+    },
+    // keep the parts just ahead of the playhead loaded; free ones far away
+    tick(t) {
+      const st = sliceTimeOf(h, t);
+      const want = new Set(self.needed(st));
+      const dir = speed >= 0 ? 1 : -1;
+      for (let s = 0.25; s <= LOOKAHEAD; s += 0.25) {
+        let tt = st + dir * s * Math.max(speed, 0.25);
+        if (tt > h.duration) tt -= h.duration;          // playback wraps back to the start
+        for (const p of self.needed(sliceTimeOf(h, tt))) want.add(p);
+      }
+      for (const p of parts) if (want.has(p)) self.request(p);
+      const ready = parts.filter((p) => p.state === "ready" && !want.has(p));
+      if (ready.length > 8) {
+        ready.sort((a, b) => a.used - b.used);
+        for (const p of ready.slice(0, ready.length - 8)) { p.gpu.dispose(); p.gpu = null; p.state = "idle"; }
+        onStreamChange();
+      }
+    },
+    buffered() { return parts.map((p) => ({ start: p.e.start, length: p.e.length, state: p.state })); },
+    dispose() { for (const p of parts) if (p.gpu) p.gpu.dispose(); },
+  };
+  return self;
+}
+
+// where stream files come from: a URL folder, or files picked from disk
+function urlSource(manifestUrl) {
+  const base = new URL(".", new URL(manifestUrl, location.href));
+  return {
+    async get(file) {
+      const r = await fetch(new URL(file, base));
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return file.endsWith(".txt") ? await r.text() : await r.arrayBuffer();
+    },
+  };
+}
+function filesSource(files) {
+  const byName = new Map(files.map((f) => [f.name, f]));
+  return {
+    async get(file) {
+      const f = byName.get(file.split("/").pop());
+      if (!f) throw new Error("not in the chosen folder");
+      return file.endsWith(".txt") ? await f.text() : await f.arrayBuffer();
+    },
+  };
+}
+
+// ---------------------------------------------------------------- UI state
+const $ = (id) => document.getElementById(id);
+const stage = $("stage"), overlay = $("overlay"), statusEl = $("status");
+let media = null, playing = true, time = 0, lastNow = performance.now();
+let speed = 1, scale = 1, scrubbing = false, dirty = true, fpsAvg = 0, slowNet = false, buffering = false;
+
+const logMap = (v, lo, hi) => lo * Math.pow(hi / lo, v / 1000);
+const logInv = (x, lo, hi) => Math.round(1000 * Math.log(x / lo) / Math.log(hi / lo));
+const SPEED = [0.05, 4], SCALE = [0.1, 4];
+$("speed").value = logInv(1, ...SPEED);
+$("scale").value = logInv(1, ...SCALE);
+
+function span() { return media ? media.h.duration : 0; }
+
+function setStatus(msg, isError = false) { statusEl.textContent = msg; statusEl.classList.toggle("error", isError); }
+function setOverlay(msg, isError = false) {
+  overlay.hidden = !msg; overlay.textContent = msg || ""; overlay.classList.toggle("error", isError);
+}
+
+function kb(b) { return b < 1024 * 1024 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(2) + " MB"; }
+function fillInfo() {
+  const h = media.h;
+  const rows = [
+    ["Source", `${h.srcW} × ${h.srcH}`],
+    ["Length", h.duration > 0 ? `${h.duration.toFixed(2)} s` + (h.loop ? ", loops" : "") : "single frame"],
+    ["Source rate", h.fps > 0 ? `${h.fps.toFixed(2)} fps` : "–"],
+  ];
+  if (media.kind === "stream") {
+    rows.push(["Parts", `<span id="parts-info">${media.parts.length}</span>`],
+              ["Blobs", media.n.toLocaleString()],
+              ["Downloaded", `<span id="dl-info">–</span>`]);
+  } else {
+    rows.push(["Blobs", media.n.toLocaleString()], ["Motion groups", media.G.toLocaleString()],
+              ["File size", `${kb(media.bytes)} (${(media.bytes / Math.max(media.n, 1)).toFixed(1)} B/blob)`]);
+  }
+  rows.push(["Drawn at", `<span id="res">–</span>`], ["Display", `<span id="fps">–</span>`]);
+  $("info").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  onStreamChange();
+}
+
+// buffer bar under the scrubber and the stream lines in the panel
+function onStreamChange() {
+  const bar = $("bufbar");
+  if (!media || media.kind !== "stream") { bar.hidden = true; return; }
+  bar.hidden = false;
+  const d = Math.max(span(), 1e-6);
+  bar.innerHTML = media.buffered().map((b) =>
+    `<span class="buf ${b.state}" style="left:${(100 * b.start / d).toFixed(3)}%;width:${(100 * b.length / d).toFixed(3)}%"></span>`
+  ).join("");
+  const ready = media.parts.filter((p) => p.state === "ready").length;
+  const load = media.parts.filter((p) => p.state === "loading").length;
+  const pi = $("parts-info");
+  if (pi) pi.textContent = `${media.parts.length} (${ready} in memory${load ? `, ${load} loading` : ""})`;
+  const dl = $("dl-info");
+  if (dl) dl.textContent = `${kb(media.downloaded)} of ${kb(media.bytes)}`;
+}
+
+function layout() {
+  if (!media) return;
+  const pad = 36;
+  const aspect = media.h.aspect;
+  const availW = Math.max(64, stage.clientWidth - pad);
+  const availH = Math.max(64, stage.clientHeight - pad);
+  const fitW = Math.min(availW, availH / aspect);
+  const dpr = window.devicePixelRatio || 1;
+  let cssW = fitW * scale;
+  let pxW = Math.round(cssW * dpr), pxH = Math.round(cssW * aspect * dpr);
+  const over = Math.max(pxW, pxH) / maxSide;
+  if (over > 1) { pxW = Math.floor(pxW / over); pxH = Math.floor(pxH / over); }
+  pxW = Math.max(1, pxW); pxH = Math.max(1, pxH);
+  renderer.setSize(pxW, pxH, false);
+  canvas.style.width = `${cssW}px`;
+  canvas.style.height = `${cssW * aspect}px`;
+  $("scale-out").textContent = `${Math.round(scale * 100)}%`;
+  const res = $("res"); if (res) res.textContent = `${pxW} × ${pxH} px`;
+  dirty = true;
+}
+
+function updateTime(t) {
+  const h = media.h;
+  const st = sliceTimeOf(h, t);
+  const frame = h.fps > 0 ? st * h.fps : 0;
+  // fixed-width fields (figure spaces pad the digits) so the panel never shifts
+  const total = h.fps > 0 ? Math.round(h.duration * h.fps) : 0;
+  const pad = (x, w) => x.padStart(w, " ");
+  $("t-now").textContent = pad(st.toFixed(3), span().toFixed(3).length) + " s";
+  $("t-len").textContent = span().toFixed(2) + " s";
+  $("t-frame").textContent = h.fps > 0
+    ? `source frame ${pad(frame.toFixed(2), String(total).length + 3)} of ${total}`
+    : "still image: no frames";
+  if (!scrubbing && span() > 0) $("scrub").value = Math.round(1000 * st / span());
+}
+
+function setPlaying(p) {
+  playing = p;
+  $("icon-pause").hidden = !p; $("icon-play").hidden = p;
+  $("play").setAttribute("aria-label", p ? "Pause" : "Play");
+}
+
+function setMedia(m) {
+  if (media) media.dispose();
+  media = m;
+  time = 0;
+  const still = m.h.duration <= 0;
+  $("scrub").disabled = still; $("play").disabled = still;
+  fillInfo(); layout(); updateTime(0);
+  dirty = true;
+}
+
+async function loadBuffer(buf, name) {
+  setOverlay("Decoding…");
+  const t0 = performance.now();
+  const parsed = await parseJyvw(buf);
+  setMedia(fileMedia(parsed, name));
+  setOverlay("");
+  setStatus(`${name}: ${parsed.n.toLocaleString()} blobs, decoded in ${(performance.now() - t0).toFixed(0)} ms`);
+}
+
+async function loadUrl(url, name) {
+  try {
+    setOverlay("Loading…");
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Couldn't load ${name} (HTTP ${r.status}).`);
+    const buf = url.endsWith(".txt") ? b64ToBuffer(await r.text()) : await r.arrayBuffer();
+    await loadBuffer(buf, name);
+  } catch (e) { fail(e); }
+}
+
+async function openStream(man, source, name) {
+  setMedia(streamMedia(man, source, name));
+  setOverlay("Buffering…");
+  setStatus(`${name}: streaming ${man.parts.length} parts (${kb(man.bytes)} in all); playback starts once the first part arrives`);
+}
+
+async function loadStreamUrl(url, name) {
+  try {
+    setOverlay("Loading manifest…");
+    let r;
+    try { r = await fetch(url); }
+    catch (e) { throw new Error("Couldn't fetch the manifest. The server may not allow requests from this page (cross-origin), or the address is wrong."); }
+    if (!r.ok) throw new Error(`Couldn't load the manifest (HTTP ${r.status}).`);
+    await openStream(await r.json(), urlSource(url), name || url);
+  } catch (e) { fail(e); }
+}
+
+async function loadStreamFolder(files) {
+  try {
+    const list = Array.from(files);
+    const mf = list.find((f) => f.name === "manifest.json");
+    if (!mf) throw new Error("That folder has no manifest.json. Make one with: python stream.py film.jyvw film_stream/");
+    const man = JSON.parse(await mf.text());
+    await openStream(man, filesSource(list), (mf.webkitRelativePath || "").split("/")[0] || "stream folder");
+    const own = $("own-option");
+    own.hidden = false; own.textContent = `Your stream: ${man.title || "folder"}`; own.value = "";
+    $("clip").value = "";
+  } catch (e) { fail(e); }
+}
+
+async function loadFile(file) {
+  if (!file) return;
+  try {
+    await loadBuffer(await file.arrayBuffer(), file.name);
+    const own = $("own-option");
+    own.hidden = false; own.textContent = `Your file: ${file.name}`; own.value = "";
+    $("clip").value = "";
+  } catch (e) { fail(e); }
+}
+
+function fail(e) {
+  console.error(e);
+  setStatus(e.message || String(e), true);
+  if (!media) setOverlay(e.message || String(e), true); else setOverlay("");
+}
+
+// ---------------------------------------------------------------- events
+$("clip").addEventListener("change", (e) => {
+  const opt = e.target.selectedOptions[0];
+  const v = e.target.value;
+  if (!v) return;
+  if (v.startsWith("stream:")) loadStreamUrl(v.slice(7), opt.textContent);
+  else loadUrl(v, opt.textContent);
+});
+$("file").addEventListener("change", (e) => { loadFile(e.target.files[0]); e.target.value = ""; });
+$("folder").addEventListener("change", (e) => { loadStreamFolder(e.target.files); e.target.value = ""; });
+$("stream-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const url = $("stream-url").value.trim();
+  if (url) loadStreamUrl(url, url);
+});
+$("slow-net").addEventListener("change", (e) => { slowNet = e.target.checked; });
+stage.addEventListener("dragover", (e) => { e.preventDefault(); stage.classList.add("dragging"); });
+stage.addEventListener("dragleave", () => stage.classList.remove("dragging"));
+stage.addEventListener("drop", (e) => {
+  e.preventDefault(); stage.classList.remove("dragging");
+  loadFile(e.dataTransfer.files[0]);
+});
+$("play").addEventListener("click", () => setPlaying(!playing));
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLSelectElement)) {
+    e.preventDefault(); if (media && span() > 0) setPlaying(!playing);
+  }
+});
+$("scrub").addEventListener("input", (e) => {
+  scrubbing = true; time = span() * e.target.value / 1000; dirty = true; updateTime(time);
+});
+$("scrub").addEventListener("change", () => { scrubbing = false; });
+$("speed").addEventListener("input", (e) => {
+  speed = logMap(+e.target.value, ...SPEED);
+  $("speed-out").textContent = `${speed.toFixed(2)}×`;
+});
+$("speed-reset").addEventListener("click", () => { $("speed").value = logInv(1, ...SPEED); speed = 1; $("speed-out").textContent = "1.00×"; });
+function setScale(s) {
+  // keep the point at the middle of the view in the middle while zooming
+  const fx = (stage.scrollLeft + stage.clientWidth / 2) / Math.max(stage.scrollWidth, 1);
+  const fy = (stage.scrollTop + stage.clientHeight / 2) / Math.max(stage.scrollHeight, 1);
+  scale = s;
+  layout();
+  stage.scrollLeft = fx * stage.scrollWidth - stage.clientWidth / 2;
+  stage.scrollTop = fy * stage.scrollHeight - stage.clientHeight / 2;
+}
+$("scale").addEventListener("input", (e) => setScale(logMap(+e.target.value, ...SCALE)));
+$("scale-reset").addEventListener("click", () => { $("scale").value = logInv(1, ...SCALE); setScale(1); });
+const VIEW_NOTES = [
+  "The decoded picture.",
+  "How much blob weight covers each pixel: dark blue = barely covered (holes show black), white = heavily stacked.",
+  "Each pixel takes the colour of the blob with the most weight there, so you can see each blob's footprint.",
+  "Where each blob is in its life: green = fading in, white = at its peak, red = fading out.",
+  "One colour per motion group (blobs sharing a track); grey = moves on its own.",
+];
+$("view-mode").addEventListener("change", (e) => {
+  debug.mode = +e.target.value; $("view-note").textContent = VIEW_NOTES[debug.mode]; dirty = true;
+});
+for (const [id, key] of [["opt-rings", "rings"], ["opt-dots", "dots"], ["opt-arrows", "arrows"]]) {
+  $(id).addEventListener("change", (e) => { debug[key] = e.target.checked; dirty = true; });
+}
+new ResizeObserver(() => layout()).observe(stage);
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - lastNow) / 1000);
+  lastNow = now;
+  if (media) {
+    media.tick(time);
+    const list = media.active(time);
+    if (!list) {
+      // a part needed for this moment hasn't arrived: hold the playhead
+      if (!buffering) { buffering = true; setOverlay("Buffering…"); }
+    } else {
+      if (buffering) { buffering = false; setOverlay(""); dirty = true; }
+      if (playing && !scrubbing && span() > 0) {
+        time += dt * speed;
+        if (!media.h.loop) {
+          const end = span() - 0.5 / Math.max(media.h.fps, 1e-6);
+          if (time > end) time = 0;          // non-looping clips restart from the top
+        }
+        dirty = true;
+      }
+      if (dirty) {
+        const now_list = media.active(time) || list;
+        draw(now_list, media.h.aspect);
+        updateTime(time);
+        dirty = false;
+      }
+    }
+    if (dt > 0) fpsAvg = fpsAvg ? fpsAvg * 0.95 + 0.05 / dt : 1 / dt;
+    const f = $("fps"); if (f && Math.round(now / 250) % 2 === 0) f.textContent = `${fpsAvg.toFixed(0)} fps`;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+loadUrl($("clip").value, $("clip").selectedOptions[0].textContent);
+</script>
+
+</body>
+</html>

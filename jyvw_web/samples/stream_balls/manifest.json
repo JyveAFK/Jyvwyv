@@ -1,0 +1,59 @@
+{
+ "format": "jyvw-stream",
+ "version": 1,
+ "title": "Bouncing balls",
+ "duration": 6.0,
+ "fps": 24.0,
+ "aspect": 0.5625,
+ "source_size": [
+  320,
+  180
+ ],
+ "loop": false,
+ "encoding": "base64",
+ "blobs": 2622,
+ "bytes": 122515,
+ "master_blobs": 2622,
+ "parts": [
+  {
+   "start": 0.0,
+   "length": 0.5,
+   "reach": 6.0,
+   "file": "part_0001.jyvw.txt",
+   "bytes": 57501,
+   "blobs": 1271
+  },
+  {
+   "start": 0.5,
+   "length": 1.5,
+   "reach": 6.0,
+   "file": "part_0002.jyvw.txt",
+   "bytes": 13833,
+   "blobs": 280
+  },
+  {
+   "start": 2.0,
+   "length": 1.5,
+   "reach": 6.0,
+   "file": "part_0003.jyvw.txt",
+   "bytes": 21906,
+   "blobs": 451
+  },
+  {
+   "start": 3.5,
+   "length": 0.5,
+   "reach": 6.0,
+   "file": "part_0004.jyvw.txt",
+   "bytes": 7776,
+   "blobs": 154
+  },
+  {
+   "start": 4.0,
+   "length": 2.0,
+   "reach": 6.0,
+   "file": "part_0005.jyvw.txt",
+   "bytes": 21499,
+   "blobs": 466
+  }
+ ]
+}

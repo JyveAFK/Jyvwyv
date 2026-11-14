@@ -1,0 +1,43 @@
+{
+ "format": "jyvw-stream",
+ "version": 1,
+ "title": "Three scenes",
+ "duration": 3.5,
+ "fps": 24.0,
+ "aspect": 0.5625,
+ "source_size": [
+  320,
+  180
+ ],
+ "loop": false,
+ "encoding": "base64",
+ "blobs": 1334,
+ "bytes": 54745,
+ "master_blobs": 1334,
+ "parts": [
+  {
+   "start": 0.0,
+   "length": 1.25,
+   "reach": 1.229167,
+   "file": "part_0001.jyvw.txt",
+   "bytes": 19247,
+   "blobs": 445
+  },
+  {
+   "start": 1.25,
+   "length": 1.25,
+   "reach": 2.479167,
+   "file": "part_0002.jyvw.txt",
+   "bytes": 16298,
+   "blobs": 442
+  },
+  {
+   "start": 2.5,
+   "length": 1.0,
+   "reach": 3.5,
+   "file": "part_0003.jyvw.txt",
+   "bytes": 19200,
+   "blobs": 447
+  }
+ ]
+}
