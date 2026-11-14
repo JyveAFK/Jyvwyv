@@ -25,6 +25,12 @@ var debug_flags := 0
 var selected_id := NO_BLOB
 var ring_sigma := 1.0
 var arrow_secs := 0.25
+var zoom := 1.0                ## 1 = whole frame; 4 = a quarter of its width fills the render
+var origin := Vector2.ZERO     ## top-left of the view, normalised units (x 0..1, y 0..aspect)
+## Picture adjustments (image view): brightness, contrast, saturation as in Godot's
+## WorldEnvironment, a colour correction LUT (set_lut), greyscale and posterise.
+var adjust := {"on": false, "brightness": 1.0, "contrast": 1.0, "saturation": 1.0,
+	"greyscale": false, "posterize": 0, "dither": false}
 var capture_timings := false   ## GPU timestamps around the two passes (main RenderingDevice only)
 
 var width := 0
@@ -50,6 +56,14 @@ var _set_slice := RID()
 var _set_raster := RID()
 var _pick := RID()
 var _groups := RID()
+var _light := RID()           ## this frame's light grid (flashes)
+var _light_on := false
+var _light_gw := 1
+var _light_gh := 1
+var _lut_kind := 0            ## 0 none, 1 1D gradient, 2 3D LUT
+var _lut1d := RID()
+var _lut3d := RID()
+var _sampler := RID()
 var _retired: Array = []       ## [rid, frames_left] freed a few frames later (Texture2DRD may still use them)
 
 
@@ -81,7 +95,19 @@ func setup(file: JyvwFile) -> String:
 		gbytes.resize(16)        # storage buffers can't be empty
 	_groups = rd.storage_buffer_create(gbytes.size(), gbytes)
 	_sliced = rd.storage_buffer_create(maxi(count, 1) * 64)
+	_light_gw = maxi(file.light_gw, 1)
+	_light_gh = maxi(file.light_gh, 1)
+	_light = rd.storage_buffer_create(maxi(_light_gw * _light_gh * 24, 16))
 	_stats = rd.storage_buffer_create(16)
+	var ss := RDSamplerState.new()
+	ss.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	ss.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	ss.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	ss.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	ss.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_sampler = rd.sampler_create(ss)
+	_lut1d = _make_lut_texture(false, 1, 1, PackedByteArray([255, 255, 255, 255]))
+	_lut3d = _make_lut_texture(true, 1, 1, PackedByteArray([255, 255, 255, 255]))
 	print("[jyvw] renderer ready in %d ms" % (Time.get_ticks_msec() - t0))
 	return ""
 
@@ -127,16 +153,57 @@ func resize(w: int, h: int) -> void:
 	_set_slice = rd.uniform_set_create([
 		_buf_uniform(0, _blobs), _buf_uniform(1, _sliced), _buf_uniform(2, _counts),
 		_buf_uniform(3, _lists), _buf_uniform(4, _stats), _buf_uniform(5, _groups)], _shader_slice, 0)
+	_make_raster_set()
+	print("[jyvw] render target %dx%d (%dx%d tiles, %.1f MB tile lists)" %
+		[w, h, tiles_x, tiles_y, n_tiles * tile_cap * 4 / 1048576.0])
+
+
+func _make_raster_set() -> void:
+	if not out_tex.is_valid():
+		return
 	var img := RDUniform.new()
 	img.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 	img.binding = 3
 	img.add_id(out_tex)
+	var l1 := RDUniform.new()
+	l1.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	l1.binding = 6
+	l1.add_id(_sampler)
+	l1.add_id(_lut1d)
+	var l3 := RDUniform.new()
+	l3.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	l3.binding = 7
+	l3.add_id(_sampler)
+	l3.add_id(_lut3d)
 	_set_raster = rd.uniform_set_create([
 		_buf_uniform(0, _sliced), _buf_uniform(1, _counts), _buf_uniform(2, _lists), img,
-		_buf_uniform(4, _pick)],
+		_buf_uniform(4, _pick), _buf_uniform(5, _light), l1, l3],
 		_shader_raster, 0)
-	print("[jyvw] render target %dx%d (%dx%d tiles, %.1f MB tile lists)" %
-		[w, h, tiles_x, tiles_y, n_tiles * tile_cap * 4 / 1048576.0])
+
+
+func _make_lut_texture(three_d: bool, w: int, h: int, rgba: PackedByteArray, depth := 1) -> RID:
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_3D if three_d else RenderingDevice.TEXTURE_TYPE_2D
+	fmt.width = w
+	fmt.height = h
+	fmt.depth = depth if three_d else 1
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	return rd.texture_create(fmt, RDTextureView.new(), [rgba])
+
+
+## The colour correction texture: kind 0 none, 1 a 1D gradient (`size` x 1 RGBA8
+## texels), 2 a 3D LUT (`size`^3 RGBA8 texels, red fastest, then green, then blue
+## slices). Call on the render thread (JyvwLut loads them from files and textures).
+func set_lut(kind: int, size: int, rgba: PackedByteArray) -> void:
+	if kind == 1:
+		_retire(_lut1d)
+		_lut1d = _make_lut_texture(false, size, 1, rgba)
+	elif kind == 2:
+		_retire(_lut3d)
+		_lut3d = _make_lut_texture(true, size, size, rgba, size)
+	_lut_kind = kind
+	_make_raster_set()
 
 
 func _buf_uniform(binding: int, rid: RID) -> RDUniform:
@@ -145,6 +212,15 @@ func _buf_uniform(binding: int, rid: RID) -> RDUniform:
 	u.binding = binding
 	u.add_id(rid)
 	return u
+
+
+## The light grid for the next render (from JyvwFile.light_at; empty = none).
+## Call on the render thread.
+func set_light(vals: PackedFloat32Array) -> void:
+	_light_on = vals.size() == _light_gw * _light_gh * 6 and _light.is_valid()
+	if _light_on:
+		var b := vals.to_byte_array()
+		rd.buffer_update(_light, 0, b.size(), b)
 
 
 ## Render the slice at time t (seconds) into out_tex.
@@ -158,7 +234,7 @@ func render(t: float) -> void:
 	var pc1 := PackedByteArray()
 	pc1.resize(64)
 	pc1.encode_float(0, t)
-	pc1.encode_float(4, float(width))
+	pc1.encode_float(4, float(width) * zoom)
 	pc1.encode_u32(8, width)
 	pc1.encode_u32(12, height)
 	pc1.encode_u32(16, tiles_x)
@@ -170,9 +246,11 @@ func render(t: float) -> void:
 	pc1.encode_float(40, arrow_secs)
 	pc1.encode_float(44, period)
 	pc1.encode_u32(48, group_count)
+	pc1.encode_float(52, origin.x)
+	pc1.encode_float(56, origin.y)
 
 	var pc2 := PackedByteArray()
-	pc2.resize(64)
+	pc2.resize(112)
 	pc2.encode_u32(0, width)
 	pc2.encode_u32(4, height)
 	pc2.encode_u32(8, tiles_x)
@@ -186,6 +264,22 @@ func render(t: float) -> void:
 	pc2.encode_u32(40, selected_id)
 	pc2.encode_float(44, ring_sigma)
 	pc2.encode_float(48, arrow_secs)
+	pc2.encode_float(52, 1.0 if _light_on else 0.0)
+	pc2.encode_float(56, float(_light_gw))
+	pc2.encode_float(60, float(_light_gh))
+	var aspect := float(height) / float(maxi(width, 1))
+	pc2.encode_float(64, origin.x)
+	pc2.encode_float(68, origin.y / maxf(aspect, 1e-6))
+	pc2.encode_float(72, 1.0 / zoom)
+	var on: bool = adjust.on
+	pc2.encode_float(80, adjust.brightness if on else 1.0)
+	pc2.encode_float(84, adjust.contrast if on else 1.0)
+	pc2.encode_float(88, adjust.saturation if on else 1.0)
+	pc2.encode_float(92, float(_lut_kind) if on else 0.0)
+	pc2.encode_float(96, float(adjust.posterize))
+	pc2.encode_float(100, 1.0 if adjust.dither else 0.0)
+	pc2.encode_float(104, 1.0 if adjust.greyscale else 0.0)
+	pc2.encode_float(108, 1.0 if (on or adjust.greyscale or adjust.posterize >= 2) else 0.0)
 
 	var timed := capture_timings and not is_local
 	if timed:
@@ -209,6 +303,13 @@ func render(t: float) -> void:
 	if is_local:
 		rd.submit()
 		rd.sync()
+
+
+## Re-upload part of the blob buffer after the file's bytes changed (deleting /
+## restoring blobs rewrites their weights). Call on the render thread.
+func update_blob_bytes(bytes: PackedByteArray, offset: int) -> void:
+	if _blobs.is_valid() and bytes.size() > 0:
+		rd.buffer_update(_blobs, offset, bytes.size(), bytes)
 
 
 ## Per-frame statistics. Reading back stalls the GPU briefly, so call it rarely.
@@ -266,7 +367,8 @@ func free_all() -> void:
 	for e in _retired:
 		rd.free_rid(e[0])
 	_retired.clear()
-	for rid in [out_tex, _counts, _lists, _pick, _blobs, _groups, _sliced, _stats,
+	for rid in [out_tex, _counts, _lists, _pick, _blobs, _groups, _sliced, _stats, _light,
+			_lut1d, _lut3d, _sampler,
 			_pipe_slice, _pipe_raster, _shader_slice, _shader_raster]:
 		if rid.is_valid():
 			rd.free_rid(rid)

@@ -12,6 +12,12 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer Counts { uint c[];
 layout(set = 0, binding = 2, std430) restrict readonly buffer Lists { uint l[]; } lists;
 layout(rgba8, set = 0, binding = 3) uniform restrict writeonly image2D out_img;
 layout(set = 0, binding = 4, std430) restrict writeonly buffer Pick { uint p[]; } pick;
+// light track (flashes): this frame's grid, gw x gh nodes of gain rgb + offset rgb
+layout(set = 0, binding = 5, std430) restrict readonly buffer Light { float v[]; } light;
+// colour correction (as WorldEnvironment's adjustment_color_correction): a 1D gradient
+// (per channel, sampled at x = value) or a 3D LUT (sampled at the colour)
+layout(set = 0, binding = 6) uniform sampler2D lut1d;
+layout(set = 0, binding = 7) uniform sampler3D lut3d;
 
 layout(push_constant, std430) uniform Params {
 	uint img_w;
@@ -26,10 +32,64 @@ layout(push_constant, std430) uniform Params {
 	uint selected;     // highlighted blob id (0xFFFFFFFF = none)
 	float ring_k;      // outline radius in sigmas
 	float arrow_secs;  // motion arrow length in seconds
-	float pad0;
-	float pad1;
-	float pad2;
+	float light_on;    // 1 = apply the light grid (image view only)
+	float light_gw;
+	float light_gh;
+	vec4 view;         // zoom: view origin as a fraction of the frame (x, y), 1 / zoom, -
+	vec4 adjust;       // brightness, contrast, saturation, colour correction (0 none, 1 1D, 2 3D)
+	vec4 post;         // posterise levels (0 off), dither (1 on), greyscale (1 on), adjustments on (1)
 } pc;
+
+// Godot's WorldEnvironment adjustments (brightness, contrast, saturation, then the
+// colour correction texture), same maths as its tonemap shader
+vec3 apply_adjust(vec3 c) {
+	c = mix(vec3(0.0), c, pc.adjust.x);
+	c = mix(vec3(0.5), c, pc.adjust.y);
+	c = mix(vec3(dot(vec3(1.0), c) * 0.33333), c, pc.adjust.z);
+	c = clamp(c, 0.0, 1.0);
+	if (pc.adjust.w > 1.5) {
+		c = textureLod(lut3d, c, 0.0).rgb;
+	} else if (pc.adjust.w > 0.5) {
+		c = vec3(textureLod(lut1d, vec2(c.r, 0.0), 0.0).r, textureLod(lut1d, vec2(c.g, 0.0), 0.0).g,
+		         textureLod(lut1d, vec2(c.b, 0.0), 0.0).b);
+	}
+	return c;
+}
+
+const float BAYER4[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+                                   3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+
+// greyscale (Rec. 709 luma), then posterise to `levels` steps per channel, with an
+// ordered 4x4 dither if asked
+vec3 apply_post(vec3 c, uvec2 p) {
+	if (pc.post.z > 0.5) c = vec3(dot(c, vec3(0.2126, 0.7152, 0.0722)));
+	float levels = pc.post.x;
+	if (levels >= 2.0) {
+		float d = pc.post.y > 0.5 ? (BAYER4[(p.y & 3u) * 4u + (p.x & 3u)] + 0.5) / 16.0 - 0.5 : 0.0;
+		c = clamp(floor(c * (levels - 1.0) + 0.5 + d) / (levels - 1.0), 0.0, 1.0);
+	}
+	return c;
+}
+
+vec3 light_node(int x, int y, int part) {
+	int i = (y * int(pc.light_gw) + x) * 6 + part * 3;
+	return vec3(light.v[i], light.v[i + 1], light.v[i + 2]);
+}
+
+// colour = gain * colour + offset, the grid stretched over the picture (bilinear,
+// nodes on the edges and corners)
+vec3 apply_light(vec3 c, vec2 uv) {
+	int gw = int(pc.light_gw), gh = int(pc.light_gh);
+	vec2 f = vec2(gw > 1 ? uv.x * float(gw - 1) : 0.0, gh > 1 ? uv.y * float(gh - 1) : 0.0);
+	ivec2 i0 = clamp(ivec2(floor(f)), ivec2(0), ivec2(max(gw - 2, 0), max(gh - 2, 0)));
+	vec2 w = clamp(f - vec2(i0), 0.0, 1.0);
+	ivec2 i1 = min(i0 + 1, ivec2(gw - 1, gh - 1));
+	vec3 g = mix(mix(light_node(i0.x, i0.y, 0), light_node(i1.x, i0.y, 0), w.x),
+	             mix(light_node(i0.x, i1.y, 0), light_node(i1.x, i1.y, 0), w.x), w.y);
+	vec3 o = mix(mix(light_node(i0.x, i0.y, 1), light_node(i1.x, i0.y, 1), w.x),
+	             mix(light_node(i0.x, i1.y, 1), light_node(i1.x, i1.y, 1), w.x), w.y);
+	return clamp(g * c + o, 0.0, 1.0);
+}
 
 const float CUTOFF2 = 9.0;   // 3 sigma squared
 const uint BATCH = 256u;
@@ -161,6 +221,13 @@ void main() {
 	float cover = clamp(acc.a * 1e4, 0.0, 1.0);
 	vec3 img = mix(pc.background.rgb, acc.rgb / (acc.a + 1e-6), cover);
 	vec3 rgb = img;
+	if (pc.mode == 0u && pc.light_on > 0.5) {
+		vec2 uv = (vec2(p) + 0.5) / vec2(float(pc.img_w), float(pc.img_h));
+		rgb = apply_light(img, pc.view.xy + uv * pc.view.z);   // the light grid spans the whole frame
+	}
+	if (pc.mode == 0u && pc.post.w > 0.5) {
+		rgb = apply_post(apply_adjust(rgb), p);
+	}
 	if (pc.mode == 1u) {
 		// log10 total weight: 1e-4 (barely covered) .. 10 (heavily covered)
 		rgb = heat((log(acc.a + 1e-7) / log(10.0) + 4.0) / 5.0);

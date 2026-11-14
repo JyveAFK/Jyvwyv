@@ -2,7 +2,7 @@
 #version 450
 
 // Pass 1: slice every blob at time t and bin it into the screen tiles it covers.
-// One thread per blob. Mirrors stsplat/model.py slice_at() exactly.
+// One thread per blob. Mirrors jyvenc/model.py slice_at() exactly.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -23,7 +23,7 @@ layout(set = 0, binding = 4, std430) restrict buffer Stats {
 
 layout(push_constant, std430) uniform Params {
 	float t;          // time in seconds
-	float scale_px;   // render width in pixels (normalised units -> pixels)
+	float scale_px;   // normalised units -> pixels: render width x zoom
 	uint img_w;
 	uint img_h;
 	uint tiles_x;
@@ -35,8 +35,8 @@ layout(push_constant, std430) uniform Params {
 	float arrow_secs; // arrow length in seconds of motion
 	float period;     // > 0: looping clip, time wraps with this period
 	uint group_count; // number of group tracks
-	uint pad0;
-	uint pad1;
+	float origin_x;   // zoom: top-left of the view in normalised units (0, 0 = whole frame)
+	float origin_y;
 	uint pad2;
 } pc;
 
@@ -126,7 +126,7 @@ void main() {
 	vec3 col = 1.0 / (1.0 + exp(-(vec3(B(o, 16u), B(o, 17u), B(o, 18u))
 	                             + vec3(B(o, 19u), B(o, 20u), B(o, 21u)) * dt)));
 
-	vec2 m = mu * pc.scale_px;
+	vec2 m = (mu - vec2(pc.origin_x, pc.origin_y)) * pc.scale_px;
 	float c = cos(th), s = sin(th);
 	vec2 sc2 = sc * sc;
 	float ix = 1.0 / sc2.x, iy = 1.0 / sc2.y;
