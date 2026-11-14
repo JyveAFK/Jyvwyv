@@ -22,15 +22,15 @@ import time
 
 import torch
 
-from stsplat import io as SIO
-from stsplat import model as M
-from stsplat import render as R
+from jyvenc import io as SIO
+from jyvenc import model as M
+from jyvenc import render as R
 from encode import ssim, psnr, fmt_time, log
 
 
 def importance(rows, bounds, period=0.0):
     """Rough contribution of each blob: weight x area x visible duration."""
-    w = torch.sigmoid(rows[:, M.OP])
+    w = M.weight_of(rows[:, M.OP])
     area = rows[:, M.LOG_S].sum(1).exp()                      # s_x * s_y at t0
     st = rows[:, M.LOG_ST].exp()
     t0 = rows[:, M.T0]
@@ -69,7 +69,7 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--log", default="", help="also write everything printed (command line, all progress lines, final report) to this text file")
     a = p.parse_args()
-    from stsplat import logfile
+    from jyvenc import logfile
     logfile.start(a.log)
 
     dev = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
@@ -153,7 +153,7 @@ def main():
             P.raw = P.raw.detach()
             with torch.no_grad():
                 P.adam_step(grad, lr, col_mask)
-                P.raw[:, M.OP].clamp_(-8, 8)
+                P.raw[:, M.OP].clamp_(-8, M.OP_MAX)
                 P.raw[:, M.COL].clamp_(-8, 8)
             if it % 50 == 0 or it == a.refit:
                 el = time.time() - t_begin
@@ -165,7 +165,8 @@ def main():
     if PERIOD > 0:
         new_rows[:, M.T0] = new_rows[:, M.T0].remainder(PERIOD)
     SIO.save(a.output, new_rows, new_bounds, d["src_w"], d["src_h"], d["aspect"], d["fps"], d["duration"],
-             compact=a.compact, loop=PERIOD > 0, parent=new_parent, groups=GROUPS)
+             compact=a.compact, loop=PERIOD > 0, parent=new_parent, groups=GROUPS, light=d.get("light"),
+             grey=bool(d.get("grey")), matte=d.get("matte"))
     # report on the file as written (includes compact rounding)
     out = SIO.load_jyvw(a.output)
     GROUPS = out["groups"].to(dev)

@@ -17,9 +17,10 @@ import numpy as np
 import torch
 from PIL import Image
 
-from stsplat import model as M
-from stsplat import render as R
-from stsplat import io as SIO
+from jyvenc import model as M
+from jyvenc import render as R
+from jyvenc import io as SIO
+from jyvenc import light as L
 
 
 def log(msg):
@@ -38,6 +39,8 @@ class Player:
         self.fps = d["fps"]
         self.period = d["period"]          # > 0 for looping clips
         self.src = (d["src_w"], d["src_h"])
+        self.light = d.get("light")        # flashes: lighting applied over the blobs
+        self.matte = d.get("matte")        # cropped borders: the picture is drawn inside the original frame
 
     def slice_time(self, t):
         """Clamp to the encoded range: never sample past the middle of the last frame
@@ -48,8 +51,29 @@ class Player:
             return min(max(t, 0.0), self.duration - 0.5 / self.fps)
         return t
 
+    def out_height(self, width):
+        """Output height for this width: the original frame's shape when borders were cropped."""
+        if self.matte:
+            return max(1, round(width * self.matte["full_h"] / self.matte["full_w"]))
+        return max(1, round(width * self.aspect))
+
     @torch.no_grad()
     def frame(self, t, width, height=None):
+        if self.matte:
+            # cropped borders: draw the picture where it was in the original frame, black around it
+            m = self.matte
+            k = width / m["full_w"]
+            cw = max(1, round(self.src[0] * k))
+            img, n = self._frame(t, cw, max(1, round(cw * self.aspect)))
+            out = np.zeros((height or self.out_height(width), width, 3), np.uint8)
+            y0, x0 = round(m["y"] * k), round(m["x"] * k)
+            h_, w_ = min(img.shape[0], out.shape[0] - y0), min(img.shape[1], out.shape[1] - x0)
+            out[y0:y0 + h_, x0:x0 + w_] = img[:h_, :w_]
+            return out, n
+        return self._frame(t, width, height)
+
+    @torch.no_grad()
+    def _frame(self, t, width, height=None):
         t = self.slice_time(t)
         height = height or max(1, round(width * self.aspect))
         # cull by the hard visibility window first (the file is sorted by t_start)
@@ -60,6 +84,7 @@ class Player:
         sl = M.slice_at(self.rows[live], self.bounds[live], t, period=self.period,
                         parent=self.parent[live], groups=self.groups)
         img, _ = R.render(sl, width, height, max_window=1024)
+        img = L.apply(img, self.light, t)
         return (img.clamp(0, 1).cpu().numpy() * 255 + 0.5).astype(np.uint8), int(live.sum())
 
 
@@ -76,7 +101,7 @@ def main():
     p.add_argument("--device", default="auto")
     p.add_argument("--log", default="", help="also write everything printed (command line, all progress lines, final report) to this text file")
     a = p.parse_args()
-    from stsplat import logfile
+    from jyvenc import logfile
     logfile.start(a.log)
 
     dev = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
@@ -84,7 +109,7 @@ def main():
     pl = Player(a.input, dev)
     log(f"[load] {a.input}: {pl.rows.shape[0]} blobs, source {pl.src[0]}x{pl.src[1]}, "
         f"{pl.duration:.2f}s @ {pl.fps:.2f} fps")
-    height = max(1, round(a.width * pl.aspect))
+    height = pl.out_height(a.width)
 
     if a.time is not None or pl.duration == 0 or a.output.lower().endswith(".png"):
         t = a.time if a.time is not None else a.start

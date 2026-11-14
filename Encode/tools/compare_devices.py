@@ -28,9 +28,9 @@ sys.path.insert(0, ROOT)
 import torch
 
 import encode as E
-from stsplat import io as SIO
-from stsplat import model as M
-from stsplat import render as R
+from jyvenc import io as SIO
+from jyvenc import model as M
+from jyvenc import render as R
 
 TOL = 1e-2            # relative difference treated as a real disagreement
 found = []            # (iteration, what) of every disagreement
@@ -134,7 +134,7 @@ def main():
     p.add_argument("--check-steps", type=int, default=20, help="real training steps run on both devices at each check")
     p.add_argument("--test-device", default="cuda", help="device under test (cuda; cpu only to test this tool)")
     a = p.parse_args()
-    from stsplat import logfile
+    from jyvenc import logfile
     logfile.start(a.log)
     dev = a.test_device
     if dev.startswith("cuda") and not torch.cuda.is_available():
@@ -203,7 +203,7 @@ def main():
                         if rel(gg, gc) > TOL:
                             cols = torch.argsort(diff, descending=True)[:3].tolist()
                             log(f"  [compare]            worst columns: {cols} "
-                                f"(see stsplat/model.py: MU=0,1 T0=2 LOG_ST=3 LOG_S=4,5 THETA=6 COL=7-9 OP=10)")
+                                f"(see jyvenc/model.py: MU=0,1 T0=2 LOG_ST=3 LOG_S=4,5 THETA=6 COL=7-9 OP=10)")
             # the same real training steps from the same state on both devices
             sync(shadow, gpu)
             sync(cpu, gpu)

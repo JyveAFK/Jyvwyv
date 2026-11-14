@@ -16,10 +16,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from stsplat import io as SIO
-from stsplat import model as M
-from stsplat import render as R
-from stsplat import render_warp as RW
+from jyvenc import io as SIO
+from jyvenc import model as M
+from jyvenc import render as R
+from jyvenc import render_warp as RW
 
 
 def run(d, dev, renderer, t, width):

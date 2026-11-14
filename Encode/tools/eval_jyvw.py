@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import torch
 
-from stsplat import io as SIO
-from stsplat import model as M
-from stsplat import render as R
+from jyvenc import io as SIO
+from jyvenc import model as M
+from jyvenc import render as R
 R.set_backend("auto", "cpu", print)
 
 
@@ -31,7 +31,7 @@ def main():
     p.add_argument("--start", type=float, default=0, help="same --start used when encoding")
     p.add_argument("--log", default="", help="also write everything printed (command line, all progress lines, final report) to this text file")
     a = p.parse_args()
-    from stsplat import logfile
+    from jyvenc import logfile
     logfile.start(a.log)
 
     d = SIO.load_jyvw(a.jyvw)
@@ -44,6 +44,8 @@ def main():
         with torch.no_grad():
             img, _ = R.render(M.slice_at(d["rows"], d["bounds"], t, period=d["period"],
                                           parent=d["parent"], groups=d["groups"]), fr.width, h, max_window=1024)
+            from jyvenc import light as L
+            img = L.apply(img, d.get("light"), t)
         tgt = fr.get(i)
         mse = float(((img - tgt) ** 2).mean())
         dark = tgt.mean(-1) < 0.15
